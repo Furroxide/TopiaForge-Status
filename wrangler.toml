@@ -1,0 +1,24 @@
+name = "topiaforge-status"
+main = "src/worker.js"
+compatibility_date = "2026-08-15"
+workers_dev = false
+preview_urls = false
+routes = [{ pattern = "status.topiaforge.dev", custom_domain = true }]
+
+[observability]
+enabled = false
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = ["/api/*", "/internal/*"]
+
+# Provision the binding through the protected deploy workflow. No account identifiers are committed.
+[[d1_databases]]
+binding = "DB"
+database_name = "topiaforge-status"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "migrations"
+
+[triggers]
+crons = ["23 3 * * *"]

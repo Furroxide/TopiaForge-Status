@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <meta
+      name="description"
+      content="TopiaForge multiplayer service availability, incidents and privacy-preserving activity estimates."
+    />
+    <title>TopiaForge · Service status</title>
+    <link rel="icon" href="/favicon.png" />
+    <link rel="stylesheet" href="/style.css" />
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to service status</a>
+    <header>
+      <a
+        href="https://docs.topiaforge.dev"
+        aria-label="TopiaForge documentation"
+        ><img src="/wordmark.png" width="190" alt="TopiaForge"
+      /></a>
+      <nav aria-label="External links">
+        <a href="https://docs.topiaforge.dev/guides/multiplayer/"
+          >Multiplayer guide ↗</a
+        ><a href="https://github.com/Furroxide/TopiaForge-Status">Source ↗</a>
+      </nav>
+    </header>
+    <main id="main">
+      <div class="eyebrow">MULTIPLAYER SERVICES</div>
+      <h1>A clear view of<br /><span>what’s running.</span></h1>
+      <p class="intro">
+        Service availability, connection checks, and activity across TopiaForge
+        multiplayer.
+      </p>
+      <div class="toolbar">
+        <div class="segmented" aria-label="Environment">
+          <button
+            type="button"
+            data-environment="production"
+            aria-pressed="true"
+          >
+            Production</button
+          ><button
+            type="button"
+            data-environment="staging"
+            aria-pressed="false"
+          >
+            Staging
+          </button>
+        </div>
+        <label
+          >Time window
+          <select id="range">
+            <option value="24h">Last 24 hours</option>
+            <option value="7d">Last 7 days</option>
+            <option value="30d">Last 30 days</option>
+            <option value="90d">Last 90 days</option>
+          </select></label
+        >
+      </div>
+      <div id="notice" role="status" aria-live="polite">
+        Loading service observations…
+      </div>
+      <section aria-labelledby="services-title">
+        <div class="section-heading">
+          <h2 id="services-title">Service availability</h2>
+          <span id="updated" class="muted"></span>
+        </div>
+        <div id="components" class="components"></div>
+      </section>
+      <section aria-labelledby="history-title">
+        <div class="section-heading">
+          <h2 id="history-title">Observed availability</h2>
+          <span class="muted">Gaps remain unknown</span>
+        </div>
+        <div id="availability" class="panel"></div>
+        <p class="caption">
+          Uptime is the share of successful observed checks. Coverage shows how
+          many expected checks returned a result. Maintenance failures remain
+          included.
+        </p>
+      </section>
+      <section aria-labelledby="activity-title">
+        <div class="section-heading">
+          <h2 id="activity-title">Multiplayer activity</h2>
+          <span class="muted">15-minute publication delay</span>
+        </div>
+        <div class="metrics">
+          <article class="panel">
+            <h3>Active Internet sessions</h3>
+            <p class="metric" id="sessions">—</p>
+          </article>
+          <article class="panel">
+            <h3>Reported players</h3>
+            <p class="metric" id="players">—</p>
+          </article>
+          <article class="panel">
+            <h3>API response time</h3>
+            <p class="metric" id="latency">—</p>
+            <p class="caption" id="latency-detail">Waiting for measurements</p>
+          </article>
+        </div>
+        <div id="activity-history" class="panel chart-panel"></div>
+        <p class="caption">
+          Estimates include public and invite-only Internet sessions, across
+          game builds. Counts come from host heartbeats; they are not unique
+          players. LAN sessions and synthetic monitors are excluded. Both counts
+          are hidden below five sessions or ten reported players.
+        </p>
+      </section>
+      <section aria-labelledby="incidents-title">
+        <div class="section-heading">
+          <h2 id="incidents-title">Incidents &amp; maintenance</h2>
+          <a href="/api/incidents">Public incident data ↗</a>
+        </div>
+        <div id="incidents"></div>
+      </section>
+      <footer>
+        <p>
+          Checks run outside the multiplayer service: basic checks every 5
+          minutes, full connection checks every 10 minutes.
+        </p>
+        <p>
+          GitHub schedules may be delayed. This page shares Cloudflare
+          infrastructure with multiplayer and can be affected by a provider-wide
+          outage.
+        </p>
+        <a href="/api/status">Status API</a><span> · </span
+        ><a href="https://github.com/Furroxide/TopiaForge-Status"
+          >History &amp; source</a
+        >
+      </footer>
+    </main>
+  </body>
+</html>

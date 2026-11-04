@@ -1,0 +1,44 @@
+name: Multiplayer observations
+on:
+  schedule:
+    - cron: "2-57/5 * * * *"
+    - cron: "4-54/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        type: choice
+        options: [basic, full]
+        default: basic
+permissions:
+  contents: read
+jobs:
+  observe:
+    if: vars.STATUS_MONITORING_ENABLED == 'true'
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        environment: [staging, production]
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    environment: status-monitor-${{ matrix.environment }}
+    concurrency:
+      group: monitor-${{ matrix.environment }}-${{ github.event.schedule == '4-54/10 * * * *' && 'full' || inputs.mode || 'basic' }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24.18.0"
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Store observations without publishing credentials or response bodies
+        run: node scripts/monitor.mjs "$TARGET" "$MODE"
+        env:
+          TARGET: ${{ matrix.environment }}
+          MODE: ${{ github.event.schedule == '4-54/10 * * * *' && 'full' || inputs.mode || 'basic' }}
+          STATUS_INGEST_TOKEN: ${{ secrets.STATUS_INGEST_TOKEN }}
+          MONITOR_SIGNING_KEY: ${{ secrets.MONITOR_SIGNING_KEY }}
+          MONITOR_SERVER_ID: ${{ vars.MONITOR_SERVER_ID }}
+          MONITOR_ACTIVITY_TOKEN: ${{ secrets.MONITOR_ACTIVITY_TOKEN }}

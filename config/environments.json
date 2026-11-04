@@ -1,0 +1,16 @@
+{
+  "production": {
+    "label": "Production",
+    "origin": "https://mp.topiaforge.dev",
+    "launched": false,
+    "build": "2545",
+    "protocol": "1"
+  },
+  "staging": {
+    "label": "Staging",
+    "origin": "https://mp-staging.topiaforge.dev",
+    "launched": true,
+    "build": "2545",
+    "protocol": "1"
+  }
+}
