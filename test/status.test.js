@@ -275,6 +275,38 @@ test("duplicate slots are immutable and late observations cannot rewrite inciden
     db.close();
   }
 });
+test("maintenance keeps unavailable measurement evidence explicit", async () => {
+  const db = database();
+  try {
+    await ingest(db, observation(NOW, "pass"));
+    await ingest(db, observation(NOW, "blocked", "discovery"));
+    const notes = [
+      {
+        environment: "staging",
+        kind: "maintenance",
+        components: ["api", "discovery", "invites", "signaling", "relay"],
+        startsAt: NOW - 1,
+        endsAt: null,
+      },
+    ];
+    const fresh = (await current(db, envs, notes, NOW)).environments.staging
+      .components;
+    assert.equal(
+      fresh.find((c) => c.id === "api").measurementState,
+      "operational",
+    );
+    assert.equal(
+      fresh.find((c) => c.id === "discovery").measurementState,
+      "unknown",
+    );
+    const stale = (await current(db, envs, notes, NOW + 1800)).environments
+      .staging.components;
+    assert.ok(stale.every((c) => c.state === "maintenance"));
+    assert.ok(stale.every((c) => c.measurementState === "unknown"));
+  } finally {
+    db.close();
+  }
+});
 test("maintenance preserves measured failures and production never starts green", async () => {
   const db = database();
   try {

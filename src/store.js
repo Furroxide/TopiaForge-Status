@@ -99,6 +99,7 @@ export async function current(db, environments, notes, now) {
       let state = componentState(rows, now, c.cadence, config.launched);
       if (state === "operational" && open.some((i) => i.component === id))
         state = "degraded";
+      const measurementState = state;
       if (
         config.launched &&
         notes.some(
@@ -116,6 +117,7 @@ export async function current(db, environments, notes, now) {
         label: c.label,
         cadence: c.cadence,
         state,
+        measurementState,
         lastCheckedAt: rows[0]?.observed_at ?? null,
         outcome: rows[0]?.outcome ?? null,
         reason: rows[0]?.reason ?? null,

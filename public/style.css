@@ -291,6 +291,12 @@ section {
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
+.monitoring-start {
+  display: block;
+  margin-top: 4px;
+  font-size: 0.7rem;
+  color: var(--muted);
+}
 .incident {
   padding: 23px;
   border: 1px solid var(--border);

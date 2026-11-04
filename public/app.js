@@ -83,12 +83,23 @@ function availability(history, config) {
       `${h.uptime == null ? "—" : h.uptime.toFixed(2) + "%"} uptime · ${h.coverage == null ? "—" : h.coverage.toFixed(1) + "%"} coverage`,
       "numbers",
     );
+    if (h.startedAt != null && h.startedAt > history.from)
+      numbers.append(
+        el("span", `Monitoring since ${date(h.startedAt)}`, "monitoring-start"),
+      );
     row.append(el("span", c.label), bars, numbers);
     root.append(row);
   }
   root.append(
     table(
-      ["Service", "Passed", "Failed", "Expected", "Coverage"],
+      [
+        "Service",
+        "Passed",
+        "Failed",
+        "Expected",
+        "Coverage",
+        "Monitoring began",
+      ],
       config.components.map((c) => {
         const h = history.components[c.id];
         return [
@@ -97,6 +108,7 @@ function availability(history, config) {
           number(h.failed),
           number(h.expected),
           h.coverage == null ? "Unknown" : h.coverage.toFixed(1) + "%",
+          date(h.startedAt),
         ];
       }),
     ),
@@ -251,6 +263,7 @@ async function refresh() {
     for (const id of ["sessions", "players", "latency"])
       $("#" + id).textContent = "\u2014";
     $("#latency-detail").textContent = "Waiting for measurements";
+    $("#monitoring-notice").hidden = true;
   }
   $("#notice").textContent = "Loading service observations…";
   try {
@@ -275,6 +288,13 @@ async function refresh() {
       $("#components").append(row);
     }
     const states = config.components.map((c) => c.state);
+    const missing = config.components.filter(
+      (c) => (c.measurementState ?? c.state) === "unknown",
+    );
+    $("#monitoring-notice").textContent = missing.length
+      ? `Measurements unavailable for ${missing.map((c) => c.label).join(", ")}. Check the last observation times; maintenance does not establish monitoring freshness.`
+      : "";
+    $("#monitoring-notice").hidden = !missing.length;
     $("#notice").textContent = !config.launched
       ? "Production multiplayer has not launched yet. Select Staging to see current monitoring."
       : states.includes("outage")
@@ -282,7 +302,7 @@ async function refresh() {
         : states.includes("unknown")
           ? "Some services have no fresh observations. Availability is unknown for those services."
           : states.includes("maintenance")
-            ? "Planned maintenance is in progress. Observations continue to be recorded."
+            ? "Planned maintenance is in progress. Check observation times for monitoring freshness."
             : states.includes("degraded")
               ? "A check failed or a service is recovering. Further checks will confirm its status."
               : "All monitored services are operational.";
@@ -317,6 +337,9 @@ async function refresh() {
     $("#notice").textContent =
       "Status data is currently unavailable. Earlier displayed observations may be stale.";
     $("#updated").textContent = "Update failed";
+    $("#monitoring-notice").textContent =
+      "Monitoring freshness could not be verified.";
+    $("#monitoring-notice").hidden = false;
     document.querySelectorAll(".badge").forEach((b) => {
       b.className = "badge unknown";
       b.replaceChildren(

@@ -63,6 +63,7 @@
       <div id="notice" role="status" aria-live="polite">
         Loading service observations…
       </div>
+      <p id="monitoring-notice" class="caption" role="status" hidden></p>
       <section aria-labelledby="services-title">
         <div class="section-heading">
           <h2 id="services-title">Service availability</h2>
@@ -78,8 +79,9 @@
         <div id="availability" class="panel"></div>
         <p class="caption">
           Uptime is the share of successful observed checks. Coverage shows how
-          many expected checks returned a result. Maintenance failures remain
-          included.
+          many expected checks returned a result since monitoring began within
+          the selected window. Earlier time remains unobserved. Maintenance
+          failures remain included.
         </p>
       </section>
       <section aria-labelledby="activity-title">
