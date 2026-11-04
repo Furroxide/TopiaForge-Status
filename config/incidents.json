@@ -1,1 +1,19 @@
-[]
+[
+  {
+    "id": "staging-monitoring-commissioning-2026-11-04",
+    "environment": "staging",
+    "kind": "note",
+    "title": "Public monitoring commissioning",
+    "body": "Staging monitoring is being commissioned. Earlier periods have no measurements. Activity estimates will appear only after the publication delay and privacy checks. Production multiplayer has not launched.",
+    "components": [
+      "api",
+      "discovery",
+      "invites",
+      "signaling",
+      "relay"
+    ],
+    "startsAt": 1793800912,
+    "endsAt": null,
+    "incidentId": null
+  }
+]
