@@ -20,8 +20,11 @@ export function database() {
           return { results: sqlite.prepare(sql).all(...args) };
         },
         async run() {
+          const statement = sqlite.prepare(sql);
+          if (statement.columns().length)
+            return { results: statement.all(...args), meta: { changes: 0 } };
           return {
-            meta: { changes: Number(sqlite.prepare(sql).run(...args).changes) },
+            meta: { changes: Number(statement.run(...args).changes) },
           };
         },
       };

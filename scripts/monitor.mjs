@@ -1,5 +1,6 @@
 import environments from "../config/environments.json" with { type: "json" };
 import { identity, client, basic, full } from "./probes.mjs";
+import { validateActivity } from "../src/domain.js";
 const [environment, mode] = process.argv.slice(2),
   config = environments[environment];
 if (!config || !["basic", "full"].includes(mode))
@@ -47,7 +48,11 @@ if (mode === "basic" && process.env.MONITOR_ACTIVITY_TOKEN) {
     const response = await api("GET", "/v1/monitor/activity", {
       token: process.env.MONITOR_ACTIVITY_TOKEN,
     });
-    if (response.status === 200) activity = response.value;
+    if (response.status === 200)
+      activity = {
+        schema: "topiaforge.activity/1",
+        ...validateActivity(response.value, Math.floor(Date.now() / 1000)),
+      };
   } catch {
     /* Missing activity remains a gap; reliability observations still persist. */
   }

@@ -1,6 +1,9 @@
+import { availabilityBuckets } from "./history-chart.js";
 const $ = (s) => document.querySelector(s);
 let environment = "production",
   generation = 0;
+let renderedEnvironment = null,
+  renderedRange = null;
 const labels = {
   operational: "Operational",
   degraded: "Degraded",
@@ -44,7 +47,15 @@ function table(headers, rows) {
     head = el("tr");
   for (const h of headers) head.append(el("th", h));
   t.append(head);
-  for (const r of rows) {
+  if (rows.length > 288)
+    details.append(
+      el(
+        "p",
+        `Showing the latest 288 of ${number(rows.length)} measurements. The chart covers the full selected window.`,
+        "caption",
+      ),
+    );
+  for (const r of rows.slice(-288)) {
     const tr = el("tr");
     for (const c of r) tr.append(el("td", c));
     t.append(tr);
@@ -61,29 +72,9 @@ function availability(history, config) {
     const h = history.components[c.id],
       row = el("div", null, "history-row"),
       bars = el("div", null, "bars");
-    const bins = 48,
-      width = (history.to - history.from) / bins;
-    for (let i = 0; i < bins; i++) {
-      const from = history.from + i * width,
-        to = from + width;
-      const values = h.points.filter((p) => p.at >= from && p.at < to);
-      const daily = h.daily.filter((p) => p.at >= from && p.at < to);
-      const pass =
-          values.filter((p) => p.outcome === "pass").length +
-          daily.reduce((n, d) => n + d.passed, 0),
-        fail =
-          values.filter((p) => p.outcome === "fail").length +
-          daily.reduce((n, d) => n + d.failed, 0);
-      const expected = Math.max(1, width / c.cadence);
-      const state = fail
-        ? pass
-          ? "mixed"
-          : "fail"
-        : pass >= expected * 0.8
-          ? "pass"
-          : "";
-      const bar = el("span", null, `bar ${state}`);
-      bar.title = `${date(from)}: ${pass} passed, ${fail} failed; unobserved time is unknown`;
+    for (const bucket of availabilityBuckets(history, h, c.cadence)) {
+      const bar = el("span", null, `bar ${bucket.state}`);
+      bar.title = `${date(bucket.from)}: ${bucket.passed} passed, ${bucket.failed} failed, ${bucket.expected} expected; unobserved time is unknown`;
       bars.append(bar);
     }
     bars.setAttribute("aria-hidden", "true");
@@ -207,8 +198,60 @@ function renderIncidents(data) {
       el("p", "No incidents or maintenance have been recorded.", "empty"),
     );
 }
+function readingState() {
+  return ["availability", "activity-history"].map((id) => {
+    const root = $("#" + id),
+      details = root.querySelector("details"),
+      wrap = root.querySelector(".table-scroll");
+    return {
+      id,
+      open: details?.open,
+      top: wrap?.scrollTop ?? 0,
+      left: wrap?.scrollLeft ?? 0,
+      focused:
+        wrap && document.activeElement === wrap
+          ? "table"
+          : details &&
+              document.activeElement === details.querySelector("summary")
+            ? "summary"
+            : null,
+    };
+  });
+}
+function restoreReading(states) {
+  for (const state of states) {
+    const root = $("#" + state.id),
+      details = root.querySelector("details"),
+      wrap = root.querySelector(".table-scroll");
+    if (details) {
+      details.open = !!state.open;
+      if (state.focused === "summary")
+        details.querySelector("summary").focus({ preventScroll: true });
+    }
+    if (wrap) {
+      wrap.scrollTop = state.top;
+      wrap.scrollLeft = state.left;
+      if (state.focused === "table") wrap.focus({ preventScroll: true });
+    }
+  }
+}
 async function refresh() {
   const request = ++generation;
+  if (
+    renderedEnvironment !== environment ||
+    renderedRange !== $("#range").value
+  ) {
+    for (const id of [
+      "components",
+      "availability",
+      "activity-history",
+      "incidents",
+    ])
+      $("#" + id).replaceChildren();
+    for (const id of ["sessions", "players", "latency"])
+      $("#" + id).textContent = "\u2014";
+    $("#latency-detail").textContent = "Waiting for measurements";
+  }
   $("#notice").textContent = "Loading service observations…";
   try {
     const [status, history, incidents] = await Promise.all([
@@ -218,6 +261,7 @@ async function refresh() {
     ]);
     if (request !== generation) return;
     const config = status.environments[environment];
+    const reading = readingState();
     $("#updated").textContent = `Updated ${date(status.generatedAt)}`;
     $("#components").replaceChildren();
     for (const c of config.components) {
@@ -265,6 +309,9 @@ async function refresh() {
     availability(history, config);
     activity(history);
     renderIncidents(incidents);
+    restoreReading(reading);
+    renderedEnvironment = environment;
+    renderedRange = $("#range").value;
   } catch {
     if (request !== generation) return;
     $("#notice").textContent =
@@ -279,6 +326,8 @@ async function refresh() {
     });
     $("#sessions").textContent = "Unavailable";
     $("#players").textContent = "Unavailable";
+    $("#latency").textContent = "\u2014";
+    $("#latency-detail").textContent = "Latest update unavailable";
   }
 }
 document.querySelectorAll("[data-environment]").forEach((button) =>

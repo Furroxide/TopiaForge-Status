@@ -449,3 +449,7 @@ details {
     grid-column: auto;
   }
 }
+
+.bar.partial {
+  background: repeating-linear-gradient(135deg, #72ae8f 0 3px, #293442 3px 6px);
+}

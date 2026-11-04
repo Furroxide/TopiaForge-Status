@@ -42,7 +42,14 @@ export function componentState(rows, now, cadence, launched) {
     return "degraded";
   return "operational";
 }
-export function summary(rows, daily, now, since, cadence) {
+export function summary(
+  rows,
+  daily,
+  now,
+  since,
+  cadence,
+  latencySince = -Infinity,
+) {
   const passed =
     rows.filter((r) => r.outcome === "pass").length +
     daily.reduce((n, r) => n + r.passed, 0);
@@ -54,7 +61,12 @@ export function summary(rows, daily, now, since, cadence) {
       ? 0
       : Math.floor(now / cadence) - Math.floor(since / cadence) + 1;
   const latencies = rows
-    .filter((r) => r.outcome === "pass" && Number.isFinite(r.latency_ms))
+    .filter(
+      (r) =>
+        r.outcome === "pass" &&
+        r.observed_at >= latencySince &&
+        Number.isFinite(r.latency_ms),
+    )
     .map((r) => r.latency_ms)
     .sort((a, b) => a - b);
   const percentile = (p) =>
@@ -107,7 +119,8 @@ export function validateActivity(value, now) {
 export function validateObservation(value, now, environments) {
   if (
     !value ||
-    !environments[value.environment]?.launched ||
+    !Object.hasOwn(environments, value.environment) ||
+    !environments[value.environment].launched ||
     !/^[0-9]{1,24}(?:-[0-9]{1,4})?$/.test(value.runId) ||
     !Number.isSafeInteger(value.observedAt) ||
     value.observedAt > now + 30 ||
@@ -120,7 +133,7 @@ export function validateObservation(value, now, environments) {
   const seen = new Set();
   const components = value.components.map((r) => {
     if (
-      !COMPONENTS[r.component] ||
+      !Object.hasOwn(COMPONENTS, r.component) ||
       seen.has(r.component) ||
       !["pass", "fail", "blocked"].includes(r.outcome) ||
       !REASONS.includes(r.reason) ||
@@ -138,13 +151,19 @@ export function validateObservation(value, now, environments) {
       latencyMs: r.latencyMs,
     };
   });
+  let activity = null;
+  try {
+    if (value.activity != null)
+      activity = validateActivity(value.activity, now);
+  } catch {
+    /* Optional telemetry never discards a valid availability check. */
+  }
   return {
     environment: value.environment,
     runId: value.runId,
     observedAt: value.observedAt,
     components,
-    activity:
-      value.activity == null ? null : validateActivity(value.activity, now),
+    activity,
   };
 }
 export function validateNotes(notes, environments) {
@@ -154,7 +173,7 @@ export function validateNotes(notes, environments) {
     if (
       !/^[a-z0-9-]{1,100}$/.test(n.id) ||
       ids.has(n.id) ||
-      !environments[n.environment] ||
+      !Object.hasOwn(environments, n.environment) ||
       !["note", "maintenance"].includes(n.kind) ||
       typeof n.title !== "string" ||
       !n.title.trim() ||
@@ -163,7 +182,7 @@ export function validateNotes(notes, environments) {
       n.body.length > 4000 ||
       !Array.isArray(n.components) ||
       !n.components.length ||
-      n.components.some((c) => !COMPONENTS[c]) ||
+      n.components.some((c) => !Object.hasOwn(COMPONENTS, c)) ||
       !Number.isSafeInteger(n.startsAt) ||
       (n.endsAt !== null &&
         (!Number.isSafeInteger(n.endsAt) || n.endsAt <= n.startsAt)) ||

@@ -34,6 +34,146 @@ const observation = (at, outcome, component = "api") => ({
   ],
   activity: null,
 });
+
+test("a storage failure cannot commit an observation without its incident transition", async () => {
+  const db = database();
+  try {
+    await ingest(db, observation(NOW, "fail"));
+    const prepare = db.prepare.bind(db);
+    let failOnce = true;
+    db.prepare = (sql) => {
+      const statement = prepare(sql);
+      if (sql.includes("INTO incidents")) {
+        const run = statement.run.bind(statement);
+        statement.run = async () => {
+          if (failOnce) {
+            failOnce = false;
+            throw new Error("injected storage interruption");
+          }
+          return run();
+        };
+      }
+      return statement;
+    };
+    await assert.rejects(
+      () => ingest(db, observation(NOW + 300, "fail")),
+      /storage interruption/,
+    );
+    await ingest(db, observation(NOW + 300, "fail"));
+    assert.equal((await incidents(db, [], NOW + 300)).automatic.length, 1);
+  } finally {
+    db.close();
+  }
+});
+
+test("optional stale activity cannot discard a valid reliability observation", async (t) => {
+  const db = database();
+  t.after(() => db.close());
+  t.mock.method(Date, "now", () => NOW * 1000);
+  const payload = {
+    ...observation(NOW, "pass"),
+    activity: {
+      schema: "topiaforge.activity/1",
+      sampledAt: NOW - 86700,
+      state: "suppressed",
+      sessions: null,
+      players: null,
+    },
+  };
+  const response = await worker.fetch(
+    new Request("https://status.example/internal/observations", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    }),
+    { DB: db, INGEST_TOKEN: token },
+  );
+  assert.equal(response.status, 200);
+  const data = await history(db, "staging", 86400, NOW);
+  assert.equal(data.components.api.passed, 1);
+  assert.equal(data.activity.length, 0);
+});
+
+test("archived calendar-day counts cannot leak into a narrower 90-day view", async () => {
+  const db = database();
+  const now = NOW + 43200;
+  try {
+    await ingest(db, observation(NOW - 90 * 86400 + 300, "pass"));
+    await retain(db, now - 86400);
+    const data = await history(db, "staging", 90 * 86400, now);
+    assert.equal(data.components.api.passed, 0);
+    assert.equal(data.from, Math.ceil((now - 90 * 86400) / 86400) * 86400);
+  } finally {
+    db.close();
+  }
+});
+
+test("delayed detailed cleanup cannot extend the 30-day latency window", async () => {
+  const db = database();
+  try {
+    const old = observation(NOW - 31 * 86400, "pass");
+    old.components[0].latencyMs = 9000;
+    await ingest(db, old);
+    await ingest(db, observation(NOW, "pass"));
+    const data = await history(db, "staging", 90 * 86400, NOW);
+    assert.equal(data.components.api.passed, 2);
+    assert.equal(data.components.api.p95, 50);
+  } finally {
+    db.close();
+  }
+});
+
+test("an unresolved incident remains visible after hundreds of newer recoveries", async () => {
+  const db = database();
+  try {
+    await db
+      .prepare("INSERT INTO incidents VALUES (?,?,?,?,?,NULL)")
+      .bind("old-open", "staging", "relay", NOW - 10000, NOW - 9000)
+      .run();
+    for (let i = 0; i < 201; i++)
+      await db
+        .prepare("INSERT INTO incidents VALUES (?,?,?,?,?,?)")
+        .bind(`resolved-${i}`, "staging", "api", NOW + i, NOW + i, NOW + i + 1)
+        .run();
+    assert.ok(
+      (await incidents(db, [], NOW + 500)).automatic.some(
+        (i) => i.id === "old-open",
+      ),
+    );
+  } finally {
+    db.close();
+  }
+});
+
+test("retention between separate reads cannot double-count archived observations", async () => {
+  const db = database();
+  try {
+    await ingest(db, observation(NOW - 40 * 86400, "pass"));
+    const prepare = db.prepare.bind(db);
+    let injected = false;
+    db.prepare = (sql) => {
+      const statement = prepare(sql),
+        all = statement.all.bind(statement);
+      if (sql.startsWith("SELECT * FROM observations"))
+        statement.all = async () => {
+          const result = await all();
+          if (!injected) {
+            injected = true;
+            await retain(db, NOW);
+          }
+          return result;
+        };
+      return statement;
+    };
+    const data = await history(db, "staging", 90 * 86400, NOW);
+    assert.equal(data.components.api.passed, 1);
+  } finally {
+    db.close();
+  }
+});
 test("two adjacent failures open one incident; two adjacent successes recover it", async () => {
   const db = database();
   try {

@@ -194,40 +194,61 @@ export async function openSignal(origin, path, token) {
     );
     const frames = [],
       waiters = new Set();
-    let open = false;
-    const fail = () => {
+    let open = false,
+      failure = null;
+    const fail = (reason = "http-error") => {
+      if (failure) return;
+      failure = new ProbeFailure(reason);
       for (const w of waiters) {
         clearTimeout(w.timer);
-        w.reject(new ProbeFailure("http-error"));
+        w.reject(failure);
       }
       waiters.clear();
-      if (!open) reject(new ProbeFailure("http-error"));
+      if (!open) reject(failure);
     };
-    socket.on("error", fail);
-    socket.on("close", fail);
-    socket.on("unexpected-response", () => {
+    const malformed = () => {
+      fail("invalid-response");
       socket.terminate();
+    };
+    socket.on("error", () => fail());
+    socket.on("close", () => fail());
+    socket.on("unexpected-response", () => {
       fail();
+      socket.terminate();
     });
     socket.on("message", (data) => {
       let value;
       try {
         value = JSON.parse(data.toString());
       } catch {
-        socket.terminate();
+        malformed();
         return;
       }
-      if (frames.length >= 64) {
-        socket.terminate();
+      if (
+        !value ||
+        typeof value !== "object" ||
+        Array.isArray(value) ||
+        typeof value.type !== "string" ||
+        frames.length >= 64
+      ) {
+        malformed();
         return;
       }
       frames.push(value);
-      for (const w of waiters)
-        if (w.match(value)) {
+      for (const w of waiters) {
+        let matches;
+        try {
+          matches = w.match(value);
+        } catch {
+          malformed();
+          return;
+        }
+        if (matches) {
           clearTimeout(w.timer);
           waiters.delete(w);
           w.resolve(value);
         }
+      }
     });
     socket.on("open", () => {
       open = true;
@@ -235,6 +256,7 @@ export async function openSignal(origin, path, token) {
         socket,
         next: (match) =>
           new Promise((resolve, reject) => {
+            if (failure) return reject(failure);
             const found = frames.find(match);
             if (found) return resolve(found);
             const waiter = {
@@ -248,7 +270,10 @@ export async function openSignal(origin, path, token) {
             };
             waiters.add(waiter);
           }),
-        close: () => socket.terminate(),
+        close: () => {
+          fail();
+          socket.terminate();
+        },
       });
     });
   });
@@ -369,6 +394,40 @@ export async function full(
             const welcome = await b.next((f) => f.type === "welcome");
             check(welcome.hostOnline === true && welcome.role === "peer");
             await a.next((f) => f.type === "joined");
+            const peerIce = {
+              ufrag: crypto.randomBytes(4).toString("hex"),
+              pwd: crypto.randomBytes(16).toString("hex"),
+            };
+            b.socket.send(
+              canonical({ type: "offer", ice: peerIce, candidates: [] }),
+            );
+            const offer = await a.next((f) => f.type === "offer");
+            check(
+              typeof offer.peer === "string" &&
+                offer.ice?.ufrag === peerIce.ufrag &&
+                offer.ice?.pwd === peerIce.pwd &&
+                Array.isArray(offer.candidates) &&
+                offer.candidates.length === 0,
+            );
+            const hostIce = {
+              ufrag: crypto.randomBytes(4).toString("hex"),
+              pwd: crypto.randomBytes(16).toString("hex"),
+            };
+            a.socket.send(
+              canonical({
+                type: "answer",
+                peer: offer.peer,
+                ice: hostIce,
+                candidates: [],
+              }),
+            );
+            const answer = await b.next((f) => f.type === "answer");
+            check(
+              answer.ice?.ufrag === hostIce.ufrag &&
+                answer.ice?.pwd === hostIce.pwd &&
+                Array.isArray(answer.candidates) &&
+                answer.candidates.length === 0,
+            );
           })
         : blocked("signaling"),
     );

@@ -18,9 +18,9 @@ No uptime history or sample player activity is seeded. The page uses TopiaForge'
 - One durable claim per environment, mode and time slot bounds queued or manually dispatched checks.
 - A failed check degrades the component. Two failures in adjacent slots open an incident; two adjacent successes recover it.
 - Missing or blocked checks are unknown. Freshness expires after three check intervals. Observed uptime excludes unknowns; coverage exposes their absence. Maintenance does not erase failed measurements.
-- Response times measure the external probe's API and browser journey, not in-game latency. Median and p95 use successful detailed observations from at most 30 days.
+- Response times measure the external probe's API and browser journey, not in-game latency. Median and p95 use successful detailed observations from at most 30 days. The 90-day view uses UTC calendar-day boundaries so archived daily counts cannot inflate a partial day.
 - Activity includes public and invite-only Internet sessions across builds, excludes LAN sessions and configured synthetic identities, and uses host-reported player counts. These are estimates, not unique players.
-- The control plane suppresses both counts below five active sessions or ten reported players, stores no exact suppressed counts, and waits fifteen minutes before releasing a snapshot. Only released aggregates enter this database.
+- The control plane suppresses both counts below five active sessions or ten reported players, stores no exact suppressed counts, and waits fifteen minutes before releasing a snapshot. Only released aggregates enter this database. Stale or malformed optional activity never discards otherwise valid uptime observations.
 - Detailed observations remain for 30 complete days, daily availability summaries and released activity for 90 days. Automatic resolved incidents remain for 90 days; unresolved incidents and committed notes remain visible.
 
 ## Commissioning

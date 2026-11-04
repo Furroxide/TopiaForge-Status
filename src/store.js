@@ -1,4 +1,4 @@
-import { COMPONENTS, consecutive, componentState, summary } from "./domain.js";
+import { COMPONENTS, componentState, summary } from "./domain.js";
 const DAY = 86400;
 const all = async (db, sql, ...args) =>
   (
@@ -8,10 +8,11 @@ const all = async (db, sql, ...args) =>
       .all()
   ).results;
 export async function ingest(db, value) {
+  const statements = [];
   for (const c of value.components) {
     const cadence = COMPONENTS[c.component].cadence;
     const slot = Math.floor(value.observedAt / cadence) * cadence;
-    const result = await db.batch([
+    statements.push(
       db
         .prepare("INSERT OR IGNORE INTO observations VALUES (?,?,?,?,?,?,?,?)")
         .bind(
@@ -29,43 +30,53 @@ export async function ingest(db, value) {
           "INSERT INTO monitor_start VALUES (?,?,?) ON CONFLICT(environment,component) DO UPDATE SET started_at = MIN(started_at, excluded.started_at)",
         )
         .bind(value.environment, c.component, value.observedAt),
-    ]);
-    if (!result[0].meta.changes) continue;
-    const rows = await recent(db, value.environment, c.component);
-    if (rows[0]?.slot !== slot || !consecutive(rows[0], rows[1], cadence))
-      continue;
-    if (rows[0].outcome === "fail" && rows[1].outcome === "fail") {
-      await db
-        .prepare("INSERT OR IGNORE INTO incidents VALUES (?,?,?,?,?,NULL)")
-        .bind(
-          `${value.environment}-${c.component}-${rows[1].slot}`,
-          value.environment,
-          c.component,
-          rows[1].observed_at,
-          rows[0].observed_at,
-        )
-        .run();
-    } else if (rows[0].outcome === "pass" && rows[1].outcome === "pass") {
-      await db
+      db
         .prepare(
-          "UPDATE incidents SET resolved_at = ? WHERE environment = ? AND component = ? AND resolved_at IS NULL AND started_at < ?",
+          `WITH newest AS (
+        SELECT * FROM observations WHERE environment = ? AND component = ? ORDER BY slot DESC LIMIT 2
+      ) INSERT OR IGNORE INTO incidents
+        SELECT a.environment || '-' || a.component || '-' || b.slot,a.environment,a.component,b.observed_at,a.observed_at,NULL
+        FROM newest a JOIN newest b ON a.slot = b.slot + ?
+        WHERE a.slot = ? AND a.outcome = 'fail' AND b.outcome = 'fail'`,
+        )
+        .bind(value.environment, c.component, cadence, slot),
+      db
+        .prepare(
+          `WITH newest AS (
+        SELECT * FROM observations WHERE environment = ? AND component = ? ORDER BY slot DESC LIMIT 2
+      ) UPDATE incidents SET resolved_at = (
+        SELECT a.observed_at FROM newest a JOIN newest b ON a.slot = b.slot + ?
+        WHERE a.slot = ? AND a.outcome = 'pass' AND b.outcome = 'pass'
+      ) WHERE environment = ? AND component = ? AND resolved_at IS NULL
+        AND started_at < ? AND EXISTS (
+          SELECT 1 FROM newest a JOIN newest b ON a.slot = b.slot + ?
+          WHERE a.slot = ? AND a.outcome = 'pass' AND b.outcome = 'pass'
+        )`,
         )
         .bind(
-          rows[0].observed_at,
           value.environment,
           c.component,
-          rows[0].observed_at,
-        )
-        .run();
-    }
+          cadence,
+          slot,
+          value.environment,
+          c.component,
+          value.observedAt,
+          cadence,
+          slot,
+        ),
+    );
   }
   if (value.activity) {
     const a = value.activity;
-    await db
-      .prepare("INSERT OR IGNORE INTO activity VALUES (?,?,?,?,?)")
-      .bind(value.environment, a.sampledAt, a.state, a.sessions, a.players)
-      .run();
+    statements.push(
+      db
+        .prepare("INSERT OR IGNORE INTO activity VALUES (?,?,?,?,?)")
+        .bind(value.environment, a.sampledAt, a.state, a.sessions, a.players),
+    );
   }
+  // D1 batch commits observations and incident transitions together. Retrying a
+  // failed delivery cannot leave its incident permanently missing or unresolved.
+  await db.batch(statements);
 }
 export const recent = (db, env, component) =>
   all(
@@ -140,39 +151,48 @@ export async function current(db, environments, notes, now) {
   };
 }
 export async function history(db, environment, seconds, now) {
-  const start = now - seconds;
+  // Archived counts describe complete UTC days. Clip the 90-day calendar view
+  // at a day boundary rather than counting data from outside its stated range.
+  const start =
+    seconds > 30 * DAY ? Math.ceil((now - seconds) / DAY) * DAY : now - seconds;
   const components = {};
   for (const [id, c] of Object.entries(COMPONENTS)) {
-    const rows = await all(
-      db,
-      "SELECT * FROM observations WHERE environment = ? AND component = ? AND slot >= ? ORDER BY slot",
-      environment,
-      id,
-      Math.floor(start / c.cadence) * c.cadence,
-    );
-    const days = await all(
-      db,
-      "SELECT * FROM daily WHERE environment = ? AND component = ? AND day >= ? AND day < ? ORDER BY day",
-      environment,
-      id,
-      Math.floor(start / DAY) * DAY,
-      Math.floor((now - 30 * DAY) / DAY) * DAY,
-    );
-    const began = (
-      await all(
-        db,
-        "SELECT started_at FROM monitor_start WHERE environment = ? AND component = ?",
-        environment,
-        id,
-      )
-    )[0]?.started_at;
+    const [raw, archived, monitor] = await db.batch([
+      db
+        .prepare(
+          "SELECT * FROM observations WHERE environment = ? AND component = ? AND slot >= ? AND observed_at <= ? ORDER BY slot",
+        )
+        .bind(environment, id, Math.floor(start / c.cadence) * c.cadence, now),
+      db
+        .prepare(
+          "SELECT * FROM daily WHERE environment = ? AND component = ? AND day >= ? AND day < ? ORDER BY day",
+        )
+        .bind(
+          environment,
+          id,
+          Math.floor(start / DAY) * DAY,
+          Math.floor((now - 30 * DAY) / DAY) * DAY,
+        ),
+      db
+        .prepare(
+          "SELECT started_at FROM monitor_start WHERE environment = ? AND component = ?",
+        )
+        .bind(environment, id),
+    ]);
+    // Read details and archives in one snapshot: midnight retention must not
+    // make an observation disappear from, or appear twice in, the same result.
+    const rows = raw.results,
+      days = archived.results,
+      began = monitor.results[0]?.started_at;
     components[id] = {
+      startedAt: began ?? null,
       ...summary(
         rows,
         days,
         now,
         began == null ? null : Math.max(start, began),
         c.cadence,
+        Math.max(start, now - 30 * DAY),
       ),
       points: rows.map((r) => ({
         at: r.slot,
@@ -205,7 +225,10 @@ export async function incidents(db, notes, now) {
   return {
     automatic: await all(
       db,
-      "SELECT id,environment,component,started_at AS startedAt,confirmed_at AS confirmedAt,resolved_at AS resolvedAt FROM incidents ORDER BY started_at DESC LIMIT 200",
+      `SELECT id,environment,component,started_at AS startedAt,confirmed_at AS confirmedAt,resolved_at AS resolvedAt
+       FROM incidents WHERE resolved_at IS NULL OR id IN (
+         SELECT id FROM incidents WHERE resolved_at IS NOT NULL ORDER BY started_at DESC LIMIT 200
+       ) ORDER BY started_at DESC`,
     ),
     notes,
     generatedAt: now,

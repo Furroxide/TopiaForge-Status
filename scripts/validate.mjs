@@ -22,7 +22,9 @@ for (const [key, value] of Object.entries(environments)) {
 }
 for (const name of [
   "index.html",
+  "_headers",
   "app.js",
+  "history-chart.js",
   "style.css",
   "wordmark.png",
   "favicon.png",
