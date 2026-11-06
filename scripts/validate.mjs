@@ -18,6 +18,10 @@ for (const [key, value] of Object.entries(environments)) {
     typeof value.label !== "string" ||
     !value.label.trim() ||
     typeof value.launched !== "boolean" ||
+    typeof value.monitorEnabled !== "boolean" ||
+    typeof value.stableClientPublished !== "boolean" ||
+    (key === "staging" && value.stableClientPublished) ||
+    (value.stableClientPublished && !value.launched) ||
     typeof value.build !== "string" ||
     !/^\d+$/.test(value.build) ||
     typeof value.protocol !== "string" ||

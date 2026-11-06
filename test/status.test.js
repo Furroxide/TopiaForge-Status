@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { database } from "./support/db.js";
-import worker from "../src/worker.js";
+import worker, { ingestEnvironment } from "../src/worker.js";
 import {
   componentState,
   validateObservation,
@@ -33,6 +33,85 @@ const observation = (at, outcome, component = "api") => ({
     },
   ],
   activity: null,
+});
+
+test("observation credentials are bound to one environment", async () => {
+  const staging = "staging-token-for-test-with-enough-characters";
+  const production = "production-token-for-test-with-enough-characters";
+  const env = {
+    INGEST_TOKEN_STAGING: staging,
+    INGEST_TOKEN_PRODUCTION: production,
+  };
+  const request = (credential, environment) =>
+    new Request("https://status.example/internal/claim", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${credential}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ environment, mode: "basic" }),
+    });
+  assert.equal(await ingestEnvironment(request(staging, "staging"), env), "staging");
+  assert.equal(await ingestEnvironment(request(production, "production"), env), "production");
+  assert.equal(await ingestEnvironment(request(staging, "staging"), {
+    ...env,
+    INGEST_TOKEN_PRODUCTION: staging,
+  }), null);
+  const legacy = "legacy-token-for-test-with-enough-characters";
+  assert.equal(await ingestEnvironment(request(legacy, "staging"), {
+    ...env,
+    INGEST_TOKEN: legacy,
+  }), "staging");
+  assert.equal(await ingestEnvironment(request(legacy, "staging"), {
+    ...env,
+    INGEST_TOKEN: legacy,
+    INGEST_TOKEN_PRODUCTION: legacy,
+  }), null);
+  const db = database();
+  try {
+    assert.equal((await worker.fetch(request(production, "staging"), { ...env, DB: db })).status, 403);
+    assert.equal((await worker.fetch(request(staging, "production"), { ...env, DB: db })).status, 403);
+  } finally {
+    db.close();
+  }
+});
+
+test("production probes can be stored before public launch without showing green", async () => {
+  const db = database();
+  try {
+    const prelaunch = {
+      ...envs,
+      production: { label: "Production", launched: false, monitorEnabled: true },
+    };
+    const sample = { ...observation(NOW, "pass"), environment: "production" };
+    assert.equal(validateObservation(sample, NOW, prelaunch).environment, "production");
+    await ingest(db, sample);
+    const status = await current(db, prelaunch, [], NOW);
+    assert.equal(status.environments.production.launched, false);
+    assert.equal(status.environments.production.stableClientPublished, false);
+    assert.ok(status.environments.production.components.every(
+      (component) => component.state === "not-yet-launched",
+    ));
+    assert.ok(status.environments.production.components.every(
+      (component) => component.lastCheckedAt === null &&
+        component.outcome === null && component.reason === null,
+    ));
+    const publicHistory = await worker.fetch(
+      new Request("https://status.example/api/history?environment=production&range=24h"),
+      { DB: db },
+    );
+    assert.equal(publicHistory.status, 404);
+    await ingest(db, { ...observation(NOW + 300, "fail"), environment: "production" });
+    await ingest(db, { ...observation(NOW + 600, "fail"), environment: "production" });
+    const publicIncidents = await worker.fetch(
+      new Request("https://status.example/api/incidents"),
+      { DB: db },
+    );
+    const visible = await publicIncidents.json();
+    assert.equal(visible.automatic.some((incident) => incident.environment === "production"), false);
+  } finally {
+    db.close();
+  }
 });
 
 test("a storage failure cannot commit an observation without its incident transition", async () => {
@@ -89,7 +168,7 @@ test("optional stale activity cannot discard a valid reliability observation", a
       },
       body: JSON.stringify(payload),
     }),
-    { DB: db, INGEST_TOKEN: token },
+    { DB: db, INGEST_TOKEN_STAGING: token },
   );
   assert.equal(response.status, 200);
   const data = await history(db, "staging", 86400, NOW);
@@ -466,7 +545,7 @@ test("all public endpoints expose only released counts and fixed observation fie
   const db = database();
   t.after(() => db.close());
   t.mock.method(Date, "now", () => NOW * 1000);
-  const env = { DB: db, INGEST_TOKEN: token };
+  const env = { DB: db, INGEST_TOKEN_STAGING: token };
   const a = {
     schema: "topiaforge.activity/1",
     sampledAt: NOW - 900,
@@ -515,7 +594,7 @@ test("write credentials, body bounds, disabled environments and route validation
   const db = database();
   t.after(() => db.close());
   t.mock.method(Date, "now", () => NOW * 1000);
-  const env = { DB: db, INGEST_TOKEN: token };
+  const env = { DB: db, INGEST_TOKEN_STAGING: token };
   for (const headers of [{}, { authorization: "Bearer wrong" }])
     assert.equal(
       (
@@ -581,7 +660,7 @@ test("durable run claims prevent repeat traffic, including after a failed run", 
   const db = database();
   t.after(() => db.close());
   t.mock.method(Date, "now", () => NOW * 1000);
-  const env = { DB: db, INGEST_TOKEN: token };
+  const env = { DB: db, INGEST_TOKEN_STAGING: token };
   const req = () =>
     new Request("https://status.example/internal/claim", {
       method: "POST",
@@ -599,7 +678,7 @@ test("claims and retried writes keep their slot across a clock boundary", async 
   t.after(() => db.close());
   let now = NOW + 1;
   t.mock.method(Date, "now", () => now * 1000);
-  const env = { DB: db, INGEST_TOKEN: token };
+  const env = { DB: db, INGEST_TOKEN_STAGING: token };
   const post = (path, value) =>
     worker.fetch(
       new Request(`https://status.example/internal/${path}`, {
@@ -671,7 +750,7 @@ test("legacy and new full probes share a lease across adjacent slots", async (t)
   t.after(() => db.close());
   let now = NOW - 1;
   t.mock.method(Date, "now", () => now * 1000);
-  const env = { DB: db, INGEST_TOKEN: token };
+  const env = { DB: db, INGEST_TOKEN_STAGING: token };
   const post = async (path, value) => {
     const response = await worker.fetch(
       new Request(`https://status.example/internal/${path}`, {
