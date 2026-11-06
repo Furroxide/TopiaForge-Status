@@ -1,7 +1,23 @@
 import environments from "../config/environments.json" with { type: "json" };
 import notes from "../config/incidents.json" with { type: "json" };
-import { RANGES, validateNotes, validateObservation } from "./domain.js";
-import { current, history, incidents, ingest, retain } from "./store.js";
+import {
+  MONITOR_MODES,
+  RANGES,
+  slotAt,
+  validObservationTime,
+  validRunId,
+  validateNotes,
+  validateObservation,
+} from "./domain.js";
+import {
+  claimRun,
+  current,
+  history,
+  incidents,
+  ingest,
+  ownsClaim,
+  retain,
+} from "./store.js";
 validateNotes(notes, environments);
 const headers = {
   "content-type": "application/json; charset=utf-8",
@@ -10,6 +26,29 @@ const headers = {
 };
 const json = (value, status = 200) =>
   new Response(JSON.stringify(value), { status, headers });
+
+async function publicHistory(url, db, environment, range, now, ctx) {
+  // Canonical public keys keep query ordering and arbitrary headers out of the cache.
+  const key = new URL("/api/history", url);
+  key.searchParams.set("environment", environment);
+  key.searchParams.set("range", range);
+  const cache =
+    ctx &&
+    (await globalThis.caches?.open("status-history-v2").catch(() => undefined));
+  const saved = await cache?.match(key.href).catch(() => undefined);
+  if (saved) return new Response(saved.body, { headers });
+
+  const response = json(await history(db, environment, RANGES[range], now));
+  if (cache) {
+    const copy = response.clone();
+    copy.headers.set(
+      "cache-control",
+      `public, max-age=${range === "24h" ? 60 : 300}`,
+    );
+    ctx.waitUntil(cache.put(key.href, copy).catch(() => {}));
+  }
+  return response;
+}
 export async function authorized(request, token) {
   if (typeof token !== "string" || token.length < 32) return false;
   const actual = request.headers.get("authorization") ?? "";
@@ -23,7 +62,10 @@ export async function authorized(request, token) {
   return different === 0;
 }
 async function body(request) {
-  if (!request.headers.get("content-type")?.startsWith("application/json"))
+  if (
+    request.headers.get("content-type")?.split(";")[0].trim().toLowerCase() !==
+    "application/json"
+  )
     throw new Error("media type");
   const reader = request.body?.getReader();
   if (!reader) throw new Error("body");
@@ -46,10 +88,10 @@ async function body(request) {
     bytes.set(c, offset);
     offset += c.length;
   }
-  return JSON.parse(new TextDecoder().decode(bytes));
+  return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
 }
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url),
       now = Math.floor(Date.now() / 1000);
     if (
@@ -67,7 +109,10 @@ export default {
       return secured;
     }
     try {
-      if (url.pathname === "/internal/claim") {
+      if (
+        url.pathname === "/internal/claim" ||
+        url.pathname === "/internal/run-claim"
+      ) {
         if (!(await authorized(request, env.INGEST_TOKEN)))
           return json({ error: "unauthorized" }, 401);
         if (request.method !== "POST")
@@ -79,18 +124,36 @@ export default {
           return json({ error: "invalid-request" }, 400);
         }
         if (
-          !environments[claim?.environment]?.launched ||
-          !["basic", "full"].includes(claim.mode)
+          typeof claim?.environment !== "string" ||
+          !Object.hasOwn(environments, claim.environment) ||
+          !environments[claim.environment].launched ||
+          typeof claim.mode !== "string" ||
+          !Object.hasOwn(MONITOR_MODES, claim.mode)
         )
           return json({ error: "invalid-request" }, 400);
-        const cadence = claim.mode === "full" ? 600 : 300,
-          slot = Math.floor(now / cadence) * cadence;
-        const result = await env.DB.prepare(
-          "INSERT OR IGNORE INTO claims VALUES (?,?,?)",
-        )
-          .bind(claim.environment, claim.mode, slot)
-          .run();
-        return json({ acquired: result.meta.changes === 1 });
+        const { cadence } = MONITOR_MODES[claim.mode];
+        if (url.pathname === "/internal/run-claim") {
+          if (
+            !validRunId(claim.runId) ||
+            !validObservationTime(claim.observedAt, now, 60)
+          )
+            return json({ error: "invalid-request" }, 400);
+          const slot = slotAt(claim.observedAt, cadence);
+          const acquired = await claimRun(env.DB, { ...claim, slot }, now);
+          return json({ acquired, slot });
+        }
+        const slot = slotAt(now, cadence);
+        const acquired = await claimRun(
+          env.DB,
+          {
+            environment: claim.environment,
+            mode: claim.mode,
+            slot,
+            observedAt: now,
+          },
+          now,
+        );
+        return json({ acquired });
       }
       if (url.pathname === "/internal/observations") {
         if (!(await authorized(request, env.INGEST_TOKEN)))
@@ -103,6 +166,8 @@ export default {
         } catch {
           return json({ error: "invalid-request" }, 400);
         }
+        if (value.mode && !(await ownsClaim(env.DB, value)))
+          return json({ error: "claim-mismatch" }, 409);
         await ingest(env.DB, value);
         return json({ accepted: true });
       }
@@ -127,7 +192,7 @@ export default {
           !Object.hasOwn(RANGES, range)
         )
           return json({ error: "invalid-request" }, 400);
-        return json(await history(env.DB, environment, RANGES[range], now));
+        return await publicHistory(url, env.DB, environment, range, now, ctx);
       }
       return json({ error: "not-found" }, 404);
     } catch {

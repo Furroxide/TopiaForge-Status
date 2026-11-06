@@ -10,7 +10,7 @@ permissions:
   contents: read
 jobs:
   observe:
-    if: vars.STATUS_MONITORING_ENABLED == 'true'
+    if: github.ref == 'refs/heads/main' && vars.STATUS_MONITORING_ENABLED == 'true'
     strategy:
       fail-fast: false
       max-parallel: 1

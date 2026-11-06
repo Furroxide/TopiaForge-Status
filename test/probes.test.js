@@ -12,6 +12,7 @@ import {
   ProbeFailure,
   validateStatus,
   openSignal,
+  relay,
 } from "../scripts/probes.mjs";
 
 test("malformed signaling frames fail a pending probe without crashing its process", async () => {
@@ -67,7 +68,9 @@ test("a signaling server that welcomes clients but drops their frames cannot pas
         },
       };
     if (path.endsWith("/heartbeat")) return { status: 200, value: {} };
-    if (path.startsWith("/v1/servers"))
+    if (path === `/v1/servers/${host.serverId}`)
+      return { status: 404, value: { error: { code: "not-found" } } };
+    if (path.startsWith("/v1/servers?"))
       return { status: 200, value: { servers: [], next: null } };
     if (path === "/v1/invites/resolve")
       return { status: 200, value: { serverId: host.serverId } };
@@ -84,8 +87,19 @@ test("a signaling server that welcomes clients but drops their frames cannot pas
     socketFactory: async () => {
       const peer = count++ === 1,
         frames = peer
-          ? [{ type: "welcome", role: "peer", hostOnline: true }]
-          : [{ type: "welcome" }, { type: "joined" }];
+          ? [
+              {
+                type: "welcome",
+                role: "peer",
+                peer: "peer-1",
+                hostOnline: true,
+                hostRelayOnly: true,
+              },
+            ]
+          : [
+              { type: "welcome", role: "host" },
+              { type: "joined", peer: "peer-1", relayOnly: true },
+            ];
       return {
         socket: { send() {} },
         close() {},
@@ -98,6 +112,7 @@ test("a signaling server that welcomes clients but drops their frames cannot pas
     },
   });
   assert.equal(rows.find((r) => r.component === "signaling").outcome, "fail");
+  assert.equal(rows.find((r) => r.component === "discovery").outcome, "pass");
 });
 test("basic probe rejects malformed status, feature shapes and browser responses", async () => {
   assert.throws(() =>
@@ -120,6 +135,14 @@ test("basic probe rejects malformed status, feature shapes and browser responses
     )[0].outcome,
     "pass",
   );
+  const malformedListing = await basic(
+    async (_method, path) =>
+      path === "/v1/status"
+        ? { status: 200, value: flags }
+        : { status: 200, value: { servers: [null], next: null } },
+    config,
+  );
+  assert.equal(malformedListing[0].reason, "invalid-response");
 });
 test("timeouts and unexpected failures expose fixed reasons, never error text", async () => {
   const api = client(config.origin, {
@@ -176,7 +199,9 @@ test("a failed signaling stage still closes owned sockets, probes relay and clea
         },
       };
     if (path.endsWith("/heartbeat")) return { status: 200, value: {} };
-    if (path.startsWith("/v1/servers"))
+    if (path === `/v1/servers/${host.serverId}`)
+      return { status: 404, value: { error: { code: "not-found" } } };
+    if (path.startsWith("/v1/servers?"))
       return { status: 200, value: { servers: [], next: null } };
     if (path === "/v1/invites/resolve")
       return { status: 200, value: { serverId: host.serverId } };
@@ -204,6 +229,7 @@ test("a failed signaling stage still closes owned sockets, probes relay and clea
   });
   assert.equal(rows.find((r) => r.component === "signaling").reason, "timeout");
   assert.equal(rows.find((r) => r.component === "relay").outcome, "pass");
+  assert.equal(rows.find((r) => r.component === "discovery").outcome, "pass");
   assert.equal(mints, 2);
   assert.equal(ended, 1);
   assert.equal(closed, 1);
@@ -211,6 +237,21 @@ test("a failed signaling stage still closes owned sockets, probes relay and clea
     JSON.stringify(rows),
     /private token|private ticket|private invite/,
   );
+});
+test("invalid TURN credentials report only a fixed failure stage", async () => {
+  const bad = {
+    iceServers: [
+      {
+        username: "test-only-user",
+        credential: "test-only-value",
+        urls: ["turn:127.0.0.1:65536?transport=udp"],
+      },
+    ],
+  };
+  const result = await stage("relay", () => relay(bad, bad));
+  assert.equal(result.outcome, "fail");
+  assert.equal(result.reason, "relay-credentials");
+  assert.doesNotMatch(JSON.stringify(result), /test-only|127\.0\.0\.1/);
 });
 test("client refuses unbounded response bodies and classifies throttling", async () => {
   const api = client(config.origin, {

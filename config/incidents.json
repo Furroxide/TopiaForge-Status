@@ -3,8 +3,8 @@
     "id": "staging-monitoring-commissioning-2026-11-04",
     "environment": "staging",
     "kind": "note",
-    "title": "Public monitoring commissioning",
-    "body": "Staging monitoring is being commissioned. Earlier periods have no measurements. Activity estimates will appear only after the publication delay and privacy checks. Production multiplayer has not launched.",
+    "title": "Staging monitoring began",
+    "body": "Staging checks started on November 4. The public uptime record began when checks moved to a dedicated runner on November 6.",
     "components": [
       "api",
       "discovery",

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import dgram from "node:dgram";
 import crypto from "node:crypto";
 import { TurnAllocation } from "../scripts/turn-probe.mjs";
+import { verifyRelayPayloads } from "../scripts/probes.mjs";
 
 function attribute(type, value) {
   const header = Buffer.alloc(4);
@@ -202,6 +203,7 @@ test("the inherited TURN key derivation matches the RFC 5769 long-term authentic
       return {
         type: 0x0113,
         attributes: new Map([
+          [0x0009, Buffer.from([0, 0, 4, 1])],
           [0x0014, Buffer.from("example.org")],
           [0x0015, Buffer.from("f//499k954d6OL34oL9FSTvy64sA")],
         ]),
@@ -220,6 +222,36 @@ test("the inherited TURN key derivation matches the RFC 5769 long-term authentic
     );
   } finally {
     await allocation.release();
+  }
+});
+test("bidirectional TURN data tolerates one lost datagram and rejects a broken direction", async () => {
+  const server = dgram.createSocket("udp4");
+  await new Promise((resolve) => server.bind(0, "127.0.0.1", resolve));
+  const target = { address: "127.0.0.1", port: server.address().port };
+  const a = new TurnAllocation(target, "test-user", "test-credential");
+  const b = new TurnAllocation(target, "test-user", "test-credential");
+  try {
+    await a.bind("127.0.0.1");
+    await b.bind("127.0.0.1");
+    const portA = a.socket.address().port,
+      portB = b.socket.address().port;
+    let aPackets = 0;
+    let wrongChannel = false;
+    server.on("message", (packet, sender) => {
+      const fromA = sender.port === portA;
+      if (fromA && ++aPackets === 1) return;
+      packet.writeUInt16BE(fromA && !wrongChannel ? 0x4001 : 0x4000);
+      server.send(packet, fromA ? portB : portA, "127.0.0.1");
+    });
+    assert.equal(await verifyRelayPayloads(a, b), 2);
+    wrongChannel = true;
+    await assert.rejects(() => verifyRelayPayloads(a, b), {
+      reason: "relay-payload",
+    });
+    assert.equal(aPackets, 5);
+  } finally {
+    await Promise.all([a.release(), b.release()]);
+    await new Promise((resolve) => server.close(resolve));
   }
 });
 test("UDP probe ignores malformed and foreign frames and cleans pending requests on socket error", async () => {

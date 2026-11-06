@@ -9,13 +9,18 @@ validateNotes(
   ),
   environments,
 );
+if (Object.keys(environments).sort().join(",") !== "production,staging")
+  throw new Error("Expected production and staging configuration");
 for (const [key, value] of Object.entries(environments)) {
   if (
-    !["production", "staging"].includes(key) ||
     value.origin !==
       `https://mp${key === "staging" ? "-staging" : ""}.topiaforge.dev` ||
+    typeof value.label !== "string" ||
+    !value.label.trim() ||
     typeof value.launched !== "boolean" ||
+    typeof value.build !== "string" ||
     !/^\d+$/.test(value.build) ||
+    typeof value.protocol !== "string" ||
     !/^\d+$/.test(value.protocol)
   )
     throw new Error("Invalid environment");

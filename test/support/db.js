@@ -2,12 +2,9 @@ import { DatabaseSync } from "node:sqlite";
 import fs from "node:fs";
 export function database() {
   const sqlite = new DatabaseSync(":memory:");
-  sqlite.exec(
-    fs.readFileSync(
-      new URL("../../migrations/0001_status.sql", import.meta.url),
-      "utf8",
-    ),
-  );
+  const migrations = new URL("../../migrations/", import.meta.url);
+  for (const name of fs.readdirSync(migrations).sort())
+    sqlite.exec(fs.readFileSync(new URL(name, migrations), "utf8"));
   const db = {
     prepare(sql) {
       let args = [];

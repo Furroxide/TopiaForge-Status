@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { availabilityBuckets } from "../public/history-chart.js";
+import { activityPlot, availabilityBuckets } from "../public/history-chart.js";
 test("fully covered 90-day history stays green across the archive boundary", () => {
   const DAY = 86400,
     from = 1893456000,
@@ -40,4 +40,50 @@ test("missing checks remain visibly partial and current boundary samples are inc
     bars.reduce((n, b) => n + b.passed, 0),
     2,
   );
+});
+test("the timeline distinguishes missing checks from time outside monitoring", () => {
+  const from = 1893456000;
+  const history = { from, to: from + 86400 };
+  const component = {
+    startedAt: from + 1800,
+    points: [{ at: from + 1800, outcome: "pass" }],
+    daily: [],
+  };
+  const buckets = availabilityBuckets(history, component, 300);
+  assert.equal(buckets[0].state, "outside");
+  assert.equal(buckets[1].state, "partial");
+  assert.equal(buckets[2].state, "gap");
+  assert.equal(
+    buckets.reduce((sum, bucket) => sum + bucket.expected, 0),
+    282,
+  );
+  assert.ok(
+    availabilityBuckets(
+      history,
+      { startedAt: null, points: [], daily: [] },
+      300,
+    ).every((bucket) => bucket.expected === 0 && bucket.state === "outside"),
+  );
+});
+test("activity shows isolated samples and breaks the line across missing or withheld counts", () => {
+  const data = {
+    from: 0,
+    to: 2400,
+    activity: [
+      { sampledAt: 300, state: "available", players: 10 },
+      { sampledAt: 600, state: "suppressed", players: null },
+      { sampledAt: 900, state: "available", players: 15 },
+      { sampledAt: 1200, state: "available", players: 20 },
+      { sampledAt: 1800, state: "available", players: 13 },
+    ],
+  };
+  const plot = activityPlot(data);
+  const commands = plot.path.split(" ");
+  assert.equal(plot.peak, 20);
+  assert.match(commands[0], /^M.*h0$/);
+  assert.match(commands[1], /^M[^h]+$/);
+  assert.match(commands[2], /^L/);
+  assert.match(commands[3], /^M.*h0$/);
+  assert.equal(commands.length, 4);
+  assert.equal(activityPlot({ ...data, activity: [data.activity[1]] }), null);
 });

@@ -243,6 +243,88 @@ test("missed slots and blocked checks remain unknown and reduce coverage", async
     db.close();
   }
 });
+test("coverage excludes the slot still in progress until its check arrives", async () => {
+  const db = database();
+  try {
+    await ingest(db, observation(NOW, "pass"));
+    const read = async (now) =>
+      (await history(db, "staging", 86400, now)).components.api;
+    assert.equal((await read(NOW + 301)).expected, 1);
+    assert.equal((await read(NOW + 301)).coverage, 100);
+    assert.equal((await read(NOW + 600)).expected, 2);
+    await ingest(db, observation(NOW + 605, "pass"));
+    assert.equal((await read(NOW + 602)).expected, 2);
+    assert.equal((await read(NOW + 605)).expected, 3);
+  } finally {
+    db.close();
+  }
+});
+test("a check outside a rolling window cannot change its uptime or coverage", async () => {
+  const db = database();
+  try {
+    await ingest(db, observation(NOW + 20, "fail"));
+    await ingest(db, observation(NOW + 300, "pass"));
+    const result = (await history(db, "staging", 86400, NOW + 86400 + 50))
+      .components.api;
+    assert.equal(result.uptime, 100);
+    assert.equal(result.failed, 0);
+    assert.equal(result.expected, 287);
+    assert.equal(result.points.length, 1);
+    const boundary = (await history(db, "staging", 86400, NOW + 86400 + 10))
+      .components.api;
+    assert.equal(boundary.uptime, 50);
+    assert.equal(boundary.expected, 288);
+  } finally {
+    db.close();
+  }
+});
+test("incidents and current status agree before a skewed observation becomes visible", async () => {
+  const db = database();
+  try {
+    await ingest(db, observation(NOW, "fail"));
+    await ingest(db, observation(NOW + 300, "fail"));
+    assert.deepEqual((await incidents(db, [], NOW + 285)).automatic, []);
+    assert.equal(
+      (await current(db, envs, [], NOW + 285)).environments.staging
+        .components[0].state,
+      "degraded",
+    );
+    await ingest(db, observation(NOW + 600, "pass"));
+    await ingest(db, observation(NOW + 900, "pass"));
+    assert.equal(
+      (await incidents(db, [], NOW + 885)).automatic[0].resolvedAt,
+      null,
+    );
+    assert.equal(
+      (await current(db, envs, [], NOW + 885)).environments.staging
+        .components[0].state,
+      "degraded",
+    );
+    assert.equal(
+      (await incidents(db, [], NOW + 900)).automatic[0].resolvedAt,
+      NOW + 900,
+    );
+  } finally {
+    db.close();
+  }
+});
+test("the newest adjacent pair can open and recover an incident in either delivery order", async () => {
+  const db = database();
+  try {
+    await ingest(db, observation(NOW + 300, "fail"));
+    await ingest(db, observation(NOW, "fail"));
+    const opened = (await incidents(db, [], NOW + 300)).automatic[0];
+    assert.equal(opened.startedAt, NOW);
+    assert.equal(opened.confirmedAt, NOW + 300);
+    await ingest(db, observation(NOW + 900, "pass"));
+    await ingest(db, observation(NOW + 600, "pass"));
+    const recovered = (await incidents(db, [], NOW + 900)).automatic[0];
+    assert.equal(recovered.id, opened.id);
+    assert.equal(recovered.resolvedAt, NOW + 900);
+  } finally {
+    db.close();
+  }
+});
 test("a scheduling gap cannot confirm an incident or recovery", async () => {
   const db = database();
   try {
@@ -271,6 +353,18 @@ test("duplicate slots are immutable and late observations cannot rewrite inciden
     assert.equal(h.components.api.failed, 2);
     assert.equal(h.components.api.passed, 1);
     assert.equal((await incidents(db, [], NOW + 600)).automatic.length, 0);
+  } finally {
+    db.close();
+  }
+});
+test("a discarded duplicate cannot move the first measurement earlier", async () => {
+  const db = database();
+  try {
+    await ingest(db, observation(NOW + 10, "pass"));
+    await ingest(db, observation(NOW + 1, "fail"));
+    const h = await history(db, "staging", 86400, NOW + 20);
+    assert.equal(h.components.api.startedAt, NOW + 10);
+    assert.equal(h.components.api.passed, 1);
   } finally {
     db.close();
   }
@@ -476,6 +570,12 @@ test("write credentials, body bounds, disabled environments and route validation
     },
   );
   assert.equal((await worker.fetch(oversized, env)).status, 400);
+  for (const value of [
+    { ...observation(NOW, "pass"), environment: ["staging"] },
+    { ...observation(NOW, "pass"), runId: NOW },
+    observation(NOW, "pass", ["api"]),
+  ])
+    assert.throws(() => validateObservation(value, NOW, envs));
 });
 test("durable run claims prevent repeat traffic, including after a failed run", async (t) => {
   const db = database();
@@ -493,6 +593,122 @@ test("durable run claims prevent repeat traffic, including after a failed run", 
     });
   assert.equal((await (await worker.fetch(req(), env)).json()).acquired, true);
   assert.equal((await (await worker.fetch(req(), env)).json()).acquired, false);
+});
+test("claims and retried writes keep their slot across a clock boundary", async (t) => {
+  const db = database();
+  t.after(() => db.close());
+  let now = NOW + 1;
+  t.mock.method(Date, "now", () => now * 1000);
+  const env = { DB: db, INGEST_TOKEN: token };
+  const post = (path, value) =>
+    worker.fetch(
+      new Request(`https://status.example/internal/${path}`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(value),
+      }),
+      env,
+    );
+  const claim = {
+    environment: "staging",
+    mode: "basic",
+    observedAt: NOW - 1,
+    runId: "123-1",
+  };
+  const slot = NOW - 300;
+  const reserve = async (value) => {
+    const response = await post("run-claim", value);
+    assert.equal(response.status, 200);
+    return response.json();
+  };
+  assert.deepEqual(await reserve(claim), { acquired: true, slot });
+  assert.deepEqual(await reserve(claim), { acquired: true, slot });
+  assert.deepEqual(await reserve({ ...claim, runId: "124-1" }), {
+    acquired: false,
+    slot,
+  });
+  const report = { ...observation(claim.observedAt, "pass"), ...claim, slot };
+  assert.equal(
+    (await post("observations", { ...report, slot: NOW })).status,
+    400,
+  );
+  assert.equal(
+    (await post("observations", { ...report, runId: "124-1" })).status,
+    409,
+  );
+  assert.equal(
+    (await post("observations", observation(claim.observedAt, "fail"))).status,
+    200,
+  );
+  assert.equal(
+    (await history(db, "staging", 86400, now)).components.api.points.length,
+    0,
+  );
+  assert.equal((await post("observations", report)).status, 200);
+  assert.equal((await post("observations", report)).status, 200);
+  assert.deepEqual(await reserve(claim), { acquired: false, slot });
+  const latest = (await history(db, "staging", 86400, now)).components.api;
+  assert.deepEqual(latest.points, [
+    { at: slot, outcome: "pass", latencyMs: 50 },
+  ]);
+  assert.equal(latest.startedAt, NOW - 1);
+  assert.equal(
+    (await post("claim", { environment: "staging", mode: "basic" })).status,
+    200,
+  );
+  assert.deepEqual(await reserve({ ...claim, observedAt: NOW + 1 }), {
+    acquired: false,
+    slot: NOW,
+  });
+  now += 61;
+  assert.equal((await post("run-claim", claim)).status, 400);
+});
+test("legacy and new full probes share a lease across adjacent slots", async (t) => {
+  const db = database();
+  t.after(() => db.close());
+  let now = NOW - 1;
+  t.mock.method(Date, "now", () => now * 1000);
+  const env = { DB: db, INGEST_TOKEN: token };
+  const post = async (path, value) => {
+    const response = await worker.fetch(
+      new Request(`https://status.example/internal/${path}`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(value),
+      }),
+      env,
+    );
+    assert.equal(response.status, 200);
+    return response.json();
+  };
+  const legacy = { environment: "staging", mode: "full" };
+  assert.equal((await post("claim", legacy)).acquired, true);
+  now = NOW + 1;
+  const next = { ...legacy, observedAt: now, runId: "125-1" };
+  assert.equal((await post("run-claim", next)).acquired, false);
+  const components = ["discovery", "invites", "signaling", "relay"].map(
+    (component) => observation(NOW - 1, "pass", component).components[0],
+  );
+  await post("observations", { ...observation(NOW - 1, "pass"), components });
+  assert.equal((await post("run-claim", next)).acquired, true);
+  assert.equal((await post("run-claim", next)).acquired, true);
+
+  now = NOW + 1199;
+  assert.equal(
+    (await post("run-claim", { ...next, observedAt: now, runId: "126-1" }))
+      .acquired,
+    true,
+  );
+  now = NOW + 1201;
+  assert.equal((await post("claim", legacy)).acquired, false);
+  now = NOW + 1439;
+  assert.equal((await post("claim", legacy)).acquired, true);
 });
 test("retention archives detailed rows once and keeps 90-day history", async () => {
   const db = database();

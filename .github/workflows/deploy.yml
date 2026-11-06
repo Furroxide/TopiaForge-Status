@@ -20,6 +20,7 @@ jobs:
         run: |
           test "$GITHUB_REF" = refs/heads/main
           gh api "repos/$GITHUB_REPOSITORY/environments/status-deploy" --jq '.can_admins_bypass == false and .deployment_branch_policy.custom_branch_policies == true and ([.protection_rules[] | select(.type == "required_reviewers") | (.reviewers | length)] | any(. > 0))' | grep -qx true
+          gh api "repos/$GITHUB_REPOSITORY/environments/status-deploy/deployment-branch-policies" --jq '.total_count == 1 and (.branch_policies[0] | .name == "main" and .type == "branch")' | grep -qx true
   deploy:
     needs: preflight
     runs-on: ubuntu-latest
@@ -42,7 +43,7 @@ jobs:
           node --input-type=module <<'NODE'
           import fs from 'node:fs';
           const id=process.env.STATUS_DATABASE_ID;
-          if(!/^[0-9a-f-]{36}$/.test(id)||id==='00000000-0000-0000-0000-000000000000')throw new Error('Database binding is missing');
+          if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id)||id==='00000000-0000-0000-0000-000000000000')throw new Error('Database binding is missing or invalid');
           fs.writeFileSync('wrangler.toml',fs.readFileSync('wrangler.toml','utf8').replace('00000000-0000-0000-0000-000000000000',id));
           NODE
       - name: Apply append-only migrations and deploy
@@ -59,4 +60,7 @@ jobs:
         run: |
           set -euo pipefail
           curl --fail --silent --show-error --retry 6 --retry-all-errors --retry-delay 5 --connect-timeout 10 --max-time 20 https://status.topiaforge.dev/api/status | jq -e '.schema == "topiaforge.public-status/1" and (.environments.production.launched | type == "boolean")'
-          test "$(curl --silent --show-error --retry 6 --retry-all-errors --retry-delay 5 --connect-timeout 10 --max-time 20 --output /dev/null --write-out '%{http_code}' -X POST https://status.topiaforge.dev/internal/observations)" = 401
+          curl --fail --silent --show-error --max-time 20 'https://status.topiaforge.dev/api/history?environment=staging&range=24h' | jq -e '.environment == "staging" and (.components | length == 5)'
+          for path in claim run-claim observations; do
+            test "$(curl --silent --show-error --max-time 20 --output /dev/null --write-out '%{http_code}' -X POST "https://status.topiaforge.dev/internal/$path")" = 401
+          done

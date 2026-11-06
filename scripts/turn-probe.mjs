@@ -83,7 +83,8 @@ function xorAddress(value, transaction) {
   if (!value || value.length < 8) throw new Error("Malformed relay address");
   const family = value[1];
   const port = value.readUInt16BE(2) ^ (MAGIC >>> 16);
-  if (family === 1) {
+  if (port === 0) throw new Error("Malformed relay port");
+  if (family === 1 && value.length === 8) {
     const raw = value.readUInt32BE(4) ^ MAGIC;
     return {
       family: 4,
@@ -232,12 +233,13 @@ export class TurnAllocation {
   async allocate() {
     const transport = Buffer.from([17, 0, 0, 0]);
     const first = await this.request(0x0003, [[0x0019, transport]], false);
-    if (first.type !== 0x0113)
-      throw new Error(
-        `expected 401 to the first Allocate, got type 0x${first.type.toString(16)}`,
-      );
+    const error = first.attributes.get(0x0009);
+    if (first.type !== 0x0113 || error?.[2] !== 4 || error?.[3] !== 1)
+      throw new Error("Expected an Allocate authentication challenge");
     this.realm = first.attributes.get(0x0014);
     this.nonce = first.attributes.get(0x0015);
+    if (!this.realm?.length || !this.nonce?.length)
+      throw new Error("Incomplete Allocate authentication challenge");
     this.key = crypto
       .createHash("md5")
       .update(`${this.username}:${this.realm.toString()}:${this.credential}`)
@@ -246,10 +248,7 @@ export class TurnAllocation {
       [0x0019, transport],
       [0x000d, Buffer.from([0, 0, 0x02, 0x58])],
     ]);
-    if (answer.type !== 0x0103)
-      throw new Error(
-        `Allocate failed, type 0x${answer.type.toString(16)} code ${answer.attributes.get(0x0009)?.readUInt8(2)}${answer.attributes.get(0x0009)?.readUInt8(3)}`,
-      );
+    if (answer.type !== 0x0103) throw new Error("Allocate failed");
     this.relayed = xorAddress(
       answer.attributes.get(0x0016),
       answer.transaction,
@@ -277,11 +276,14 @@ export class TurnAllocation {
     header.writeUInt16BE(number, 0);
     header.writeUInt16BE(data.length, 2);
     const pad = Buffer.alloc((4 - (data.length % 4)) % 4);
-    this.socket.send(
-      Buffer.concat([header, data, pad]),
-      this.server.port,
-      this.server.address,
-    );
+    return new Promise((resolve, reject) => {
+      this.socket.send(
+        Buffer.concat([header, data, pad]),
+        this.server.port,
+        this.server.address,
+        (error) => (error ? reject(error) : resolve()),
+      );
+    });
   }
   async release() {
     if (this.closed) return;
