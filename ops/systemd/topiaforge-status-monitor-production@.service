@@ -1,0 +1,28 @@
+[Unit]
+Description=TopiaForge production status probe (%i)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/topiaforge-status-monitor-production/public.env
+ConditionPathExists=/etc/topiaforge-status-monitor-production/ingest-token
+ConditionPathExists=/etc/topiaforge-status-monitor-production/signing-key
+
+[Service]
+Type=oneshot
+User=topiaforge-monitor-prod
+Group=topiaforge-monitor-prod
+WorkingDirectory=/opt/topiaforge-status-monitor-production/app
+EnvironmentFile=/etc/topiaforge-status-monitor-production/public.env
+LoadCredential=STATUS_INGEST_TOKEN:/etc/topiaforge-status-monitor-production/ingest-token
+LoadCredential=MONITOR_SIGNING_KEY:/etc/topiaforge-status-monitor-production/signing-key
+Environment=GITHUB_RUN_ATTEMPT=9002
+ExecStart=/opt/topiaforge-status-monitor/node/bin/node scripts/monitor.mjs production %i
+TimeoutStartSec=150
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

@@ -1,6 +1,27 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { writeStatus } from "../scripts/monitor.mjs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { credential, writeStatus } from "../scripts/monitor.mjs";
+
+test("systemd credentials supply secrets without environment values", () => {
+  const directory = mkdtempSync(join(tmpdir(), "topiaforge-monitor-"));
+  try {
+    writeFileSync(join(directory, "STATUS_INGEST_TOKEN"), "file-token\n");
+    writeFileSync(join(directory, "MONITOR_SIGNING_KEY"), "pem-line-1\npem-line-2\n");
+    const environment = { CREDENTIALS_DIRECTORY: directory };
+    assert.equal(credential("STATUS_INGEST_TOKEN", environment), "file-token");
+    assert.equal(credential("MONITOR_SIGNING_KEY", environment), "pem-line-1\npem-line-2");
+    assert.equal(credential("MONITOR_ACTIVITY_TOKEN", environment), undefined);
+    assert.equal(
+      credential("STATUS_INGEST_TOKEN", { ...environment, STATUS_INGEST_TOKEN: "github-token" }),
+      "github-token",
+    );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 test("a lost acknowledgement and a temporary storage failure replay the same measurement", async () => {
   const requests = [];
