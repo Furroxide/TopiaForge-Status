@@ -1,0 +1,10 @@
+[Unit]
+Description=TopiaForge production API probe every five minutes
+
+[Timer]
+OnCalendar=*-*-* *:00/5:00 UTC
+AccuracySec=1s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

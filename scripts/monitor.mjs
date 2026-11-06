@@ -1,10 +1,23 @@
 import { randomInt } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import environments from "../config/environments.json" with { type: "json" };
 import { identity, client, basic, full } from "./probes.mjs";
 import { MONITOR_MODES, monitoringEnabled, slotAt, validateActivity } from "../src/domain.js";
 
 class MonitorError extends Error {}
+
+export function credential(name, environment = process.env) {
+  if (environment[name]) return environment[name];
+  if (!environment.CREDENTIALS_DIRECTORY) return undefined;
+  try {
+    return readFileSync(join(environment.CREDENTIALS_DIRECTORY, name), "utf8").trimEnd();
+  } catch (error) {
+    if (error?.code === "ENOENT") return undefined;
+    throw error;
+  }
+}
 
 export async function writeStatus(
   path,
@@ -55,11 +68,11 @@ async function main() {
     console.log("Environment monitoring is disabled; no probes sent.");
     return;
   }
-  const ingestToken = process.env.STATUS_INGEST_TOKEN;
+  const ingestToken = credential("STATUS_INGEST_TOKEN");
   if (!ingestToken || ingestToken.length < 32)
     throw new MonitorError("Missing observation credential.");
   const host =
-    mode === "full" ? identity(process.env.MONITOR_SIGNING_KEY) : null;
+    mode === "full" ? identity(credential("MONITOR_SIGNING_KEY")) : null;
   if (host && host.serverId !== process.env.MONITOR_SERVER_ID)
     throw new MonitorError("Synthetic identity is not configured.");
 
@@ -85,10 +98,11 @@ async function main() {
   const components =
     mode === "full" ? await full(api, config, host) : await basic(api, config);
   let activity = null;
-  if (mode === "basic" && process.env.MONITOR_ACTIVITY_TOKEN) {
+  const activityToken = credential("MONITOR_ACTIVITY_TOKEN");
+  if (mode === "basic" && activityToken) {
     try {
       const response = await api("GET", "/v1/monitor/activity", {
-        token: process.env.MONITOR_ACTIVITY_TOKEN,
+        token: activityToken,
       });
       if (response.status === 200)
         activity = {

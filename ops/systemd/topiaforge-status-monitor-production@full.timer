@@ -1,0 +1,10 @@
+[Unit]
+Description=TopiaForge production full probe every ten minutes
+
+[Timer]
+OnCalendar=*-*-* *:06/10:00 UTC
+AccuracySec=1s
+Persistent=false
+
+[Install]
+WantedBy=timers.target
