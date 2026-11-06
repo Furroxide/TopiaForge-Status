@@ -47,7 +47,7 @@ Edit `config/incidents.json` through a reviewed change. Each record has `id`, `e
 - `GET /api/incidents`: automatic incidents and committed explanations/maintenance.
 - `/internal/claim` and `/internal/observations`: authenticated monitor-only writes, never callable by page visitors. Unauthenticated access is always 401.
 
-GitHub schedules can be delayed, dropped, or automatically disabled after repository inactivity. Check the Actions schedule when data is stale; do not fill missing time with successes or create keep-alive source commits. This status service shares Cloudflare infrastructure with multiplayer; a provider-wide outage can affect both.
+An external Linux runner schedules staging probes. The GitHub Actions workflow is available for manual checks. When data is stale, check the runner timers and the latest ingest result. Keep missing slots visible in history. This status service shares Cloudflare infrastructure with multiplayer, so a provider-wide outage can affect both.
 
 ## Author and player experience
 

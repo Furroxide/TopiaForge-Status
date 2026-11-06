@@ -1,8 +1,5 @@
 name: Multiplayer observations
 on:
-  schedule:
-    - cron: "2-57/5 * * * *"
-    - cron: "4-54/10 * * * *"
   workflow_dispatch:
     inputs:
       mode:
@@ -23,7 +20,7 @@ jobs:
     timeout-minutes: 4
     environment: status-monitor-${{ matrix.environment }}
     concurrency:
-      group: monitor-${{ matrix.environment }}-${{ github.event.schedule == '4-54/10 * * * *' && 'full' || inputs.mode || 'basic' }}
+      group: monitor-${{ matrix.environment }}-${{ inputs.mode }}
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -37,7 +34,7 @@ jobs:
         run: node scripts/monitor.mjs "$TARGET" "$MODE"
         env:
           TARGET: ${{ matrix.environment }}
-          MODE: ${{ github.event.schedule == '4-54/10 * * * *' && 'full' || inputs.mode || 'basic' }}
+          MODE: ${{ inputs.mode }}
           STATUS_INGEST_TOKEN: ${{ secrets.STATUS_INGEST_TOKEN }}
           MONITOR_SIGNING_KEY: ${{ secrets.MONITOR_SIGNING_KEY }}
           MONITOR_SERVER_ID: ${{ vars.MONITOR_SERVER_ID }}
