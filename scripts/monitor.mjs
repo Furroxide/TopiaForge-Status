@@ -2,7 +2,7 @@ import { randomInt } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import environments from "../config/environments.json" with { type: "json" };
 import { identity, client, basic, full } from "./probes.mjs";
-import { MONITOR_MODES, slotAt, validateActivity } from "../src/domain.js";
+import { MONITOR_MODES, monitoringEnabled, slotAt, validateActivity } from "../src/domain.js";
 
 class MonitorError extends Error {}
 
@@ -51,8 +51,8 @@ async function main() {
       "Usage: monitor.mjs <production|staging> <basic|full>",
     );
   const config = environments[environment];
-  if (!config.launched) {
-    console.log("Environment has not launched; no probes sent.");
+  if (!monitoringEnabled(config)) {
+    console.log("Environment monitoring is disabled; no probes sent.");
     return;
   }
   const ingestToken = process.env.STATUS_INGEST_TOKEN;

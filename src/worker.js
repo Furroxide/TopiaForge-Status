@@ -2,6 +2,7 @@ import environments from "../config/environments.json" with { type: "json" };
 import notes from "../config/incidents.json" with { type: "json" };
 import {
   MONITOR_MODES,
+  monitoringEnabled,
   RANGES,
   slotAt,
   validObservationTime,
@@ -61,6 +62,19 @@ export async function authorized(request, token) {
   for (let i = 0; i < aa.length; i++) different |= aa[i] ^ bb[i];
   return different === 0;
 }
+
+export async function ingestEnvironment(request, env) {
+  const [staging, legacyStaging, production] = await Promise.all([
+    authorized(request, env.INGEST_TOKEN_STAGING),
+    // Transitional staging-only credential; remove after its writer rotates.
+    authorized(request, env.INGEST_TOKEN),
+    authorized(request, env.INGEST_TOKEN_PRODUCTION),
+  ]);
+  // A duplicated token would erase the environment boundary. Reject it.
+  if (production && (staging || legacyStaging)) return null;
+  if (production) return "production";
+  return staging || legacyStaging ? "staging" : null;
+}
 async function body(request) {
   if (
     request.headers.get("content-type")?.split(";")[0].trim().toLowerCase() !==
@@ -113,7 +127,8 @@ export default {
         url.pathname === "/internal/claim" ||
         url.pathname === "/internal/run-claim"
       ) {
-        if (!(await authorized(request, env.INGEST_TOKEN)))
+        const writer = await ingestEnvironment(request, env);
+        if (!writer)
           return json({ error: "unauthorized" }, 401);
         if (request.method !== "POST")
           return json({ error: "method-not-allowed" }, 405);
@@ -123,10 +138,12 @@ export default {
         } catch {
           return json({ error: "invalid-request" }, 400);
         }
+        if (claim?.environment !== writer)
+          return json({ error: "environment-forbidden" }, 403);
         if (
           typeof claim?.environment !== "string" ||
           !Object.hasOwn(environments, claim.environment) ||
-          !environments[claim.environment].launched ||
+          !monitoringEnabled(environments[claim.environment]) ||
           typeof claim.mode !== "string" ||
           !Object.hasOwn(MONITOR_MODES, claim.mode)
         )
@@ -156,7 +173,8 @@ export default {
         return json({ acquired });
       }
       if (url.pathname === "/internal/observations") {
-        if (!(await authorized(request, env.INGEST_TOKEN)))
+        const writer = await ingestEnvironment(request, env);
+        if (!writer)
           return json({ error: "unauthorized" }, 401);
         if (request.method !== "POST")
           return json({ error: "method-not-allowed" }, 405);
@@ -166,6 +184,8 @@ export default {
         } catch {
           return json({ error: "invalid-request" }, 400);
         }
+        if (value.environment !== writer)
+          return json({ error: "environment-forbidden" }, 403);
         if (value.mode && !(await ownsClaim(env.DB, value)))
           return json({ error: "claim-mismatch" }, 409);
         await ingest(env.DB, value);
@@ -175,8 +195,15 @@ export default {
         return json({ error: "method-not-allowed" }, 405);
       if (url.pathname === "/api/status" && !url.search)
         return json(await current(env.DB, environments, notes, now));
-      if (url.pathname === "/api/incidents" && !url.search)
-        return json(await incidents(env.DB, notes, now));
+      if (url.pathname === "/api/incidents" && !url.search) {
+        const visible = (environment) => environments[environment]?.launched;
+        const result = await incidents(env.DB, notes, now);
+        return json({
+          ...result,
+          automatic: result.automatic.filter((incident) => visible(incident.environment)),
+          notes: result.notes.filter((note) => visible(note.environment)),
+        });
+      }
       if (url.pathname === "/api/history") {
         if (
           [...url.searchParams.keys()].some(
@@ -192,6 +219,8 @@ export default {
           !Object.hasOwn(RANGES, range)
         )
           return json({ error: "invalid-request" }, 400);
+        if (!environments[environment].launched)
+          return json({ error: "not-yet-launched" }, 404);
         return await publicHistory(url, env.DB, environment, range, now, ctx);
       }
       return json({ error: "not-found" }, 404);

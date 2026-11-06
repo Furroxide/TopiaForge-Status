@@ -79,15 +79,15 @@ function renderCurrent() {
     "#activity-section",
   ])
     $(id).hidden = !config?.launched;
-  const stagingOnly =
-    environment === "staging" &&
-    status &&
-    !status.environments.production.launched;
   message(
     "#environment-note",
-    stagingOnly
-      ? "Staging is the test environment. Production has yet to launch."
-      : "",
+    environment === "staging"
+      ? status && !status.environments.production.launched
+        ? "Staging is the test environment. Production has yet to launch."
+        : "Staging is for internal testing and preview builds."
+      : config?.launched && !config.stableClientPublished
+        ? "Production services are live. No stable client build has been published; internal tests and previews use Staging."
+        : "",
   );
   if (statusUnavailable) {
     notice(

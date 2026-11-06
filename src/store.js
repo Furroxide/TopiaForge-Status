@@ -241,15 +241,16 @@ export async function current(db, environments, notes, now) {
         cadence: c.cadence,
         state,
         measurementState,
-        lastCheckedAt: rows[0]?.observed_at ?? null,
-        outcome: rows[0]?.outcome ?? null,
-        reason: rows[0]?.reason ?? null,
+        lastCheckedAt: config.launched ? (rows[0]?.observed_at ?? null) : null,
+        outcome: config.launched ? (rows[0]?.outcome ?? null) : null,
+        reason: config.launched ? (rows[0]?.reason ?? null) : null,
       };
     });
     const activity = samples.results[0];
     output[environment] = {
       label: config.label,
       launched: config.launched,
+      stableClientPublished: config.stableClientPublished ?? false,
       components,
       activity:
         config.launched && activity && now - activity.sampledAt < 1800
@@ -258,7 +259,7 @@ export async function current(db, environments, notes, now) {
               state: "unavailable",
               sessions: null,
               players: null,
-              sampledAt: activity?.sampledAt ?? null,
+              sampledAt: config.launched ? (activity?.sampledAt ?? null) : null,
             },
     };
   }

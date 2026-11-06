@@ -17,6 +17,7 @@ export const validRunId = (id) =>
   typeof id === "string" && /^[0-9]{1,24}(?:-[0-9]{1,4})?$/.test(id);
 export const validObservationTime = (at, now, age) =>
   Number.isSafeInteger(at) && at > 0 && at <= now + 30 && at >= now - age;
+export const monitoringEnabled = (config) => config.monitorEnabled ?? config.launched;
 export const RANGES = Object.freeze({
   "24h": 86400,
   "7d": 604800,
@@ -144,7 +145,7 @@ export function validateObservation(value, now, environments) {
     !value ||
     typeof value.environment !== "string" ||
     !Object.hasOwn(environments, value.environment) ||
-    !environments[value.environment].launched ||
+    !monitoringEnabled(environments[value.environment]) ||
     !validRunId(value.runId) ||
     !validObservationTime(value.observedAt, now, 3600) ||
     !Array.isArray(value.components) ||
