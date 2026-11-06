@@ -1,0 +1,57 @@
+name: Staging monitor handoff
+on: workflow_dispatch
+
+permissions: {}
+
+jobs:
+  handoff:
+    if: github.ref == 'refs/heads/main' && github.actor == github.repository_owner && github.run_attempt == 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    environment: status-monitor-staging
+    steps:
+      - name: Deliver the staging monitor configuration over SSH
+        shell: python
+        env:
+          MONITOR_HANDOFF_SSH: ${{ secrets.MONITOR_HANDOFF_SSH }}
+          STATUS_INGEST_TOKEN: ${{ secrets.STATUS_INGEST_TOKEN }}
+          MONITOR_SIGNING_KEY: ${{ secrets.MONITOR_SIGNING_KEY }}
+          MONITOR_SERVER_ID: ${{ vars.MONITOR_SERVER_ID }}
+          MONITOR_ACTIVITY_TOKEN: ${{ secrets.MONITOR_ACTIVITY_TOKEN }}
+        run: |
+          import ipaddress
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import tempfile
+
+          try:
+              receiver = json.loads(os.environ['MONITOR_HANDOFF_SSH'])
+              address = str(ipaddress.IPv4Address(receiver['host']))
+              names = ('STATUS_INGEST_TOKEN', 'MONITOR_SIGNING_KEY',
+                       'MONITOR_SERVER_ID', 'MONITOR_ACTIVITY_TOKEN')
+              settings = {name: os.environ[name] for name in names}
+              if not all(settings.values()):
+                  raise ValueError
+              with tempfile.TemporaryDirectory() as directory:
+                  key = Path(directory, 'identity')
+                  hosts = Path(directory, 'known_hosts')
+                  key.touch(mode=0o600)
+                  key.write_text(receiver['identity'], encoding='ascii')
+                  hosts.write_text(receiver['known_host'] + '\n', encoding='ascii')
+                  subprocess.run([
+                      'ssh', '-F', '/dev/null', '-T', '-i', str(key),
+                      '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes',
+                      '-o', 'ForwardAgent=no', '-o', 'ClearAllForwardings=yes',
+                      '-o', 'ConnectTimeout=10', '-o', 'StrictHostKeyChecking=yes',
+                      '-o', 'HostKeyAlgorithms=ssh-ed25519',
+                      '-o', 'GlobalKnownHostsFile=/dev/null',
+                      '-o', f'UserKnownHostsFile={hosts}',
+                      f'topiaforge-handoff@{address}', 'deliver-staging-monitor',
+                  ], input=json.dumps(settings).encode(), check=True, timeout=35,
+                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                      env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'})
+          except (KeyError, ValueError, OSError, subprocess.SubprocessError):
+              raise SystemExit('The encrypted handoff did not complete.') from None
+          print('The encrypted handoff completed.')
