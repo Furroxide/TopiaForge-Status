@@ -1,367 +1,599 @@
-import { availabilityBuckets } from "./history-chart.js";
-const $ = (s) => document.querySelector(s);
-let environment = "production",
-  generation = 0;
-let renderedEnvironment = null,
-  renderedRange = null;
+import { activityPlot, availabilityBuckets } from "./history-chart.js";
+
+const $ = (selector) => document.querySelector(selector);
+const buttons = [...document.querySelectorAll("[data-environment]")];
+const range = $("#range");
 const labels = {
   operational: "Operational",
   degraded: "Degraded",
   outage: "Outage",
   maintenance: "Maintenance",
   unknown: "Unknown",
-  "not-yet-launched": "Not yet launched",
 };
-const date = (seconds) =>
-  seconds == null
-    ? "No observations yet"
-    : new Date(seconds * 1000).toLocaleString(undefined, {
-        dateStyle: "medium",
-        timeStyle: "short",
-      });
-const number = (n) => (n == null ? "—" : new Intl.NumberFormat().format(n));
+const barLabels = {
+  pass: "Passed",
+  fail: "Failed",
+  mixed: "Passed and failed",
+  partial: "Passed with gaps",
+  gap: "No result",
+  outside: "No check due",
+};
+const dateFormat = new Intl.DateTimeFormat(undefined, {
+  dateStyle: "medium",
+  timeStyle: "short",
+});
+const numberFormat = new Intl.NumberFormat();
+const date = (seconds) => dateFormat.format(seconds * 1000);
+const number = (value) => numberFormat.format(value);
+
+let environment;
+let status;
+let statusUnavailable = false;
+let historyController;
+let historyKey;
+let historyLoaded = false;
+let incidents;
+let incidentsUnavailable = false;
+let renderedIncidents;
+
 function el(tag, text, className) {
-  const e = document.createElement(tag);
-  if (text != null) e.textContent = text;
-  if (className) e.className = className;
-  return e;
+  const element = document.createElement(tag);
+  if (text != null) element.textContent = text;
+  if (className) element.className = className;
+  return element;
 }
+
 function time(at) {
-  const e = el("time", date(at));
-  if (at != null) e.dateTime = new Date(at * 1000).toISOString();
-  return e;
+  const element = el("time", date(at));
+  element.dateTime = new Date(at * 1000).toISOString();
+  return element;
 }
-async function get(path) {
-  const r = await fetch(path, {
+
+function message(selector, text) {
+  const element = $(selector);
+  if (element.textContent !== text) element.textContent = text;
+  element.hidden = !text;
+}
+
+async function get(path, signal) {
+  const deadline = AbortSignal.timeout(15000);
+  const response = await fetch(path, {
     cache: "no-store",
-    signal: AbortSignal.timeout(15000),
+    signal: signal ? AbortSignal.any([signal, deadline]) : deadline,
   });
-  if (!r.ok) throw new Error("unavailable");
-  return r.json();
+  if (!response.ok) throw new Error("Unavailable");
+  return response.json();
 }
-function table(headers, rows) {
-  const details = el("details"),
-    summary = el("summary", "View measurements as a table"),
-    wrap = el("div", null, "table-scroll"),
-    t = el("table"),
-    head = el("tr");
-  for (const h of headers) head.append(el("th", h));
-  t.append(head);
-  if (rows.length > 288)
+
+function notice(state, title, detail = "") {
+  $("#notice").dataset.state = state;
+  message("#status-headline", title);
+  message("#status-detail", detail);
+}
+
+function renderCurrent() {
+  const config = status?.environments[environment];
+  for (const id of [
+    "#services-section",
+    "#history-section",
+    "#activity-section",
+  ])
+    $(id).hidden = !config?.launched;
+  const stagingOnly =
+    environment === "staging" &&
+    status &&
+    !status.environments.production.launched;
+  message(
+    "#environment-note",
+    stagingOnly
+      ? "Staging is the test environment. Production has yet to launch."
+      : "",
+  );
+  if (statusUnavailable) {
+    notice(
+      "unknown",
+      "Current status unavailable",
+      "This page will try again shortly.",
+    );
+  } else if (!config) {
+    notice("unknown", "Loading status…");
+  } else if (!config.launched) {
+    notice(
+      "unknown",
+      `${config.label} has yet to launch`,
+      status.environments.staging.launched
+        ? "Select Staging to see its checks."
+        : "",
+    );
+  } else {
+    const states = config.components.map((check) => check.state);
+    if (states.includes("outage"))
+      notice(
+        "outage",
+        "Service outage",
+        "See incidents and current checks below.",
+      );
+    else if (states.includes("degraded"))
+      notice(
+        "degraded",
+        "Service degraded",
+        "A check failed or recovery is still being confirmed.",
+      );
+    else if (states.includes("maintenance"))
+      notice("maintenance", "Maintenance in progress");
+    else if (states.includes("unknown"))
+      notice("unknown", "Some checks are unavailable");
+    else notice("operational", "All monitored services operational");
+  }
+  if (!config?.launched) return;
+
+  message(
+    "#updated",
+    statusUnavailable
+      ? `Last update ${date(status.generatedAt)}`
+      : `As of ${date(status.generatedAt)}`,
+  );
+  $("#components").replaceChildren(
+    ...config.components.map((check) => {
+      const row = el("li", null, "component");
+      const state = statusUnavailable ? "unknown" : check.state;
+      const last = el("span", null, "last-check caption");
+      if (check.lastCheckedAt == null) last.textContent = "No check yet";
+      else last.append("Checked ", time(check.lastCheckedAt));
+      row.append(
+        el("strong", check.label),
+        el("span", labels[state], `badge ${state}`),
+        last,
+      );
+      return row;
+    }),
+  );
+  const missing = config.components.filter(
+    (check) =>
+      check.state === "maintenance" && check.measurementState === "unknown",
+  );
+  message(
+    "#monitoring-notice",
+    !statusUnavailable && missing.length
+      ? `No recent checks during maintenance for ${missing.map((check) => check.label).join(", ")}.`
+      : "",
+  );
+  renderActivitySummary(config.activity);
+}
+
+function renderActivitySummary(activity) {
+  const root = $("#activity-current");
+  root.replaceChildren();
+  if (statusUnavailable || activity.state === "unavailable") {
+    root.append(el("p", "No recent activity estimate.", "muted"));
+    return;
+  }
+  if (activity.state === "suppressed") {
+    root.append(el("p", "Activity is below the privacy threshold.", "muted"));
+  } else {
+    const totals = el("dl", null, "activity-totals");
+    for (const [label, value] of [
+      ["Active sessions", activity.sessions],
+      ["Reported players", activity.players],
+    ]) {
+      const total = el("div");
+      total.append(el("dt", label, "caption"), el("dd", number(value)));
+      totals.append(total);
+    }
+    root.append(totals);
+  }
+  const sample = el("p", "Sample from ", "caption activity-sample");
+  sample.append(time(activity.sampledAt));
+  root.append(sample);
+}
+
+function table(label, headers, rows, total = rows.length) {
+  const details = el("details");
+  const summary = el("summary", label);
+  const wrap = el("div", null, "table-scroll");
+  const t = el("table");
+  const head = t.createTHead().insertRow();
+  for (const header of headers) {
+    const cell = el("th", header);
+    cell.scope = "col";
+    head.append(cell);
+  }
+  details.append(summary);
+  if (total > rows.length)
     details.append(
       el(
         "p",
-        `Showing the latest 288 of ${number(rows.length)} measurements. The chart covers the full selected window.`,
+        `Showing the latest ${number(rows.length)} of ${number(total)} samples.`,
         "caption",
       ),
     );
-  for (const r of rows.slice(-288)) {
-    const tr = el("tr");
-    for (const c of r) tr.append(el("td", c));
-    t.append(tr);
+  const body = t.createTBody();
+  for (const cells of rows) {
+    const row = body.insertRow();
+    const first = el("th", cells[0]);
+    first.scope = "row";
+    row.append(first);
+    for (const value of cells.slice(1)) row.insertCell().textContent = value;
   }
   wrap.tabIndex = 0;
+  wrap.setAttribute("role", "region");
+  wrap.setAttribute("aria-label", label);
   wrap.append(t);
-  details.append(summary, wrap);
+  details.append(wrap);
   return details;
 }
-function availability(history, config) {
+
+function bar(state) {
+  const element = el("span", null, `bar ${state}`);
+  element.setAttribute("aria-hidden", "true");
+  return element;
+}
+
+function availability(history, components) {
   const root = $("#availability");
-  root.replaceChildren();
-  for (const c of config.components) {
-    const h = history.components[c.id],
-      row = el("div", null, "history-row"),
-      bars = el("div", null, "bars");
-    for (const bucket of availabilityBuckets(history, h, c.cadence)) {
-      const bar = el("span", null, `bar ${bucket.state}`);
-      bar.title = `${date(bucket.from)}: ${bucket.passed} passed, ${bucket.failed} failed, ${bucket.expected} expected; unobserved time is unknown`;
-      bars.append(bar);
+  root.replaceChildren(
+    el(
+      "p",
+      `${date(history.from)} – ${date(history.to)}`,
+      "caption history-window",
+    ),
+  );
+  const rows = [];
+  for (const component of components) {
+    const stats = history.components[component.id];
+    const row = el("div", null, "history-row");
+    const name = el("div", component.label);
+    if (stats.startedAt != null && stats.startedAt > history.from) {
+      const started = el("span", "Since ", "caption monitoring-start");
+      started.append(time(stats.startedAt));
+      name.append(started);
     }
+    const bars = el("div", null, "bars");
     bars.setAttribute("aria-hidden", "true");
-    const numbers = el(
-      "div",
-      `${h.uptime == null ? "—" : h.uptime.toFixed(2) + "%"} uptime · ${h.coverage == null ? "—" : h.coverage.toFixed(1) + "%"} coverage`,
-      "numbers",
+    for (const bucket of availabilityBuckets(
+      history,
+      stats,
+      component.cadence,
+    )) {
+      const swatch = bar(bucket.state);
+      const gap = Math.max(0, bucket.expected - bucket.passed - bucket.failed);
+      swatch.title = `${date(bucket.from)} – ${date(bucket.to)}. ${barLabels[bucket.state]}. ${bucket.passed} passed, ${bucket.failed} failed, ${gap} without a result.`;
+      bars.append(swatch);
+      rows.push([
+        component.label,
+        date(bucket.from),
+        date(bucket.to),
+        barLabels[bucket.state],
+        bucket.passed,
+        bucket.failed,
+        gap,
+      ]);
+    }
+    const counts = el("div", null, "numbers");
+    counts.append(
+      el(
+        "strong",
+        stats.uptime == null
+          ? "No results"
+          : `${stats.uptime.toFixed(2)}% uptime`,
+      ),
     );
-    if (h.startedAt != null && h.startedAt > history.from)
-      numbers.append(
-        el("span", `Monitoring since ${date(h.startedAt)}`, "monitoring-start"),
+    if (stats.coverage != null)
+      counts.append(
+        el("span", `${stats.coverage.toFixed(1)}% coverage`, "caption"),
       );
-    row.append(el("span", c.label), bars, numbers);
+    row.append(name, bars, counts);
     root.append(row);
   }
+  const legend = el("ul", null, "legend caption");
+  for (const [state, label] of Object.entries(barLabels)) {
+    const item = el("li");
+    item.append(bar(state), label);
+    legend.append(item);
+  }
   root.append(
+    legend,
+    el(
+      "p",
+      "Uptime uses completed checks with a pass or fail. Coverage compares those results with the checks due since monitoring began.",
+      "caption",
+    ),
     table(
-      [
-        "Service",
-        "Passed",
-        "Failed",
-        "Expected",
-        "Coverage",
-        "Monitoring began",
-      ],
-      config.components.map((c) => {
-        const h = history.components[c.id];
-        return [
-          c.label,
-          number(h.passed),
-          number(h.failed),
-          number(h.expected),
-          h.coverage == null ? "Unknown" : h.coverage.toFixed(1) + "%",
-          date(h.startedAt),
-        ];
-      }),
+      "Check counts by time",
+      ["Service", "From", "To", "Result", "Passed", "Failed", "No result"],
+      rows,
     ),
   );
 }
-function activity(history) {
+
+function activityHistory(history, query) {
   const root = $("#activity-history");
   root.replaceChildren();
   const rows = history.activity;
   if (!rows.length) {
-    root.append(el("p", "No released activity measurements yet.", "empty"));
+    root.append(el("p", "No activity samples in this window.", "empty"));
     return;
   }
-  const published = rows.filter((r) => r.state === "available");
-  if (published.length) {
-    const ns = "http://www.w3.org/2000/svg",
-      svg = document.createElementNS(ns, "svg");
+  const plot = activityPlot(history);
+  if (plot) {
+    const ns = "http://www.w3.org/2000/svg";
+    const figure = el("figure", null, "activity-figure");
+    const svg = document.createElementNS(ns, "svg");
     svg.setAttribute("viewBox", "0 0 1000 150");
+    svg.setAttribute("preserveAspectRatio", "none");
     svg.classList.add("chart");
     svg.setAttribute("role", "img");
     svg.setAttribute(
       "aria-label",
-      "Host-reported players over time. Suppressed or missing measurements break the line; exact values are in the table below.",
+      "Reported players over time. Gaps show periods without published counts.",
     );
-    const max = Math.max(1, ...published.map((r) => r.players));
-    let path = "";
-    let previous = null;
-    for (const row of rows) {
-      if (row.state !== "available") {
-        previous = null;
-        continue;
-      }
-      const x =
-          10 +
-          (980 * (row.sampledAt - history.from)) / (history.to - history.from),
-        y = 135 - (120 * row.players) / max;
-      path += `${previous && row.sampledAt - previous.sampledAt === 300 ? "L" : "M"}${x.toFixed(2)},${y.toFixed(2)} `;
-      previous = row;
-    }
-    const p = document.createElementNS(ns, "path");
-    p.setAttribute("d", path);
-    svg.append(p);
-    root.append(svg);
-  } else
-    root.append(
+    const line = document.createElementNS(ns, "path");
+    line.setAttribute("d", plot.path);
+    svg.append(line);
+    figure.append(
+      svg,
       el(
-        "p",
-        "Activity is below the publication threshold, or telemetry is unavailable.",
-        "empty",
+        "figcaption",
+        `Reported players · peak ${number(plot.peak)} · ${date(history.from)} – ${date(history.to)}`,
+        "caption chart-window",
       ),
     );
+    root.append(figure);
+  } else {
+    root.append(
+      el("p", "No player counts were published in this window.", "empty"),
+    );
+  }
   root.append(
     table(
-      ["Sample time", "Active sessions", "Reported players", "Publication"],
-      rows.map((r) => [
-        date(r.sampledAt),
-        number(r.sessions),
-        number(r.players),
-        r.state === "suppressed" ? "Low activity" : r.state,
+      "Activity samples",
+      ["Sample time", "Sessions", "Players", "Counts"],
+      rows.slice(-288).map((sample) => [
+        date(sample.sampledAt),
+        sample.sessions == null ? "—" : number(sample.sessions),
+        sample.players == null ? "—" : number(sample.players),
+        {
+          available: "Published",
+          suppressed: "Withheld",
+          unavailable: "Unavailable",
+        }[sample.state],
       ]),
+      rows.length,
     ),
   );
-}
-function renderIncidents(data) {
-  const root = $("#incidents");
-  root.replaceChildren();
-  const notes = data.notes.filter((n) => n.environment === environment);
-  const items = data.automatic
-    .filter((n) => n.environment === environment)
-    .map((n) => ({
-      ...n,
-      kind: "automatic",
-      title: `${labels[n.resolvedAt ? "operational" : "outage"]} · ${n.component}`,
-      body: n.resolvedAt
-        ? "Two successful checks confirmed recovery."
-        : "Two consecutive failed checks confirmed an incident.",
-      startsAt: n.startedAt,
-      endsAt: n.resolvedAt,
-    }));
-  for (const n of [...notes, ...items].sort(
-    (a, b) => b.startsAt - a.startsAt,
-  )) {
-    const card = el("article", null, "incident");
-    card.append(el("h3", n.title), time(n.startsAt), el("p", n.body));
-    if (n.endsAt)
-      card.append(
-        el(
-          "p",
-          `${n.kind === "maintenance" ? "Ends" : "Recovered"} ${date(n.endsAt)}`,
-          "caption",
-        ),
-      );
-    if (n.incidentId)
-      card.append(el("p", `Related incident: ${n.incidentId}`, "caption"));
-    root.append(card);
+  if (rows.length > 288) {
+    const full = el("a", "All activity samples (JSON)", "caption");
+    full.href = `/api/history?${query}`;
+    root.querySelector("details").append(full);
   }
-  if (!root.children.length)
-    root.append(
-      el("p", "No incidents or maintenance have been recorded.", "empty"),
-    );
 }
-function readingState() {
-  return ["availability", "activity-history"].map((id) => {
-    const root = $("#" + id),
-      details = root.querySelector("details"),
-      wrap = root.querySelector(".table-scroll");
+
+function renderIncidents() {
+  if (!incidents || !environment) {
+    message(
+      "#incidents-message",
+      incidentsUnavailable
+        ? "Incident history unavailable."
+        : incidents
+          ? "Select an environment to see its incidents."
+          : "Loading incidents…",
+    );
+    return;
+  }
+  const notes = incidents.notes.filter(
+    (note) => note.environment === environment,
+  );
+  const automatic = incidents.automatic.filter(
+    (incident) => incident.environment === environment,
+  );
+  const components = status?.environments[environment].components ?? [];
+  const names = Object.fromEntries(
+    components.map((check) => [check.id, check.label]),
+  );
+  const key = JSON.stringify([environment, notes, automatic, names]);
+  message(
+    "#incidents-message",
+    incidentsUnavailable
+      ? "Couldn’t refresh incidents. Showing the last update."
+      : notes.length || automatic.length
+        ? ""
+        : "No incidents or maintenance recorded.",
+  );
+  if (renderedIncidents === key) return;
+  const root = $("#incidents");
+  const items = [
+    ...notes,
+    ...automatic.map((incident) => ({
+      ...incident,
+      kind: "automatic",
+      startsAt: incident.startedAt,
+      endsAt: incident.resolvedAt,
+      title: `${incident.resolvedAt == null ? "Outage" : "Resolved"} · ${names[incident.component] ?? incident.component}`,
+    })),
+  ];
+  root.replaceChildren(
+    ...items
+      .sort((a, b) => b.startsAt - a.startsAt)
+      .map((item) => {
+        const entry = el("article", null, "incident");
+        entry.id = `incident-${item.id}`;
+        entry.tabIndex = -1;
+        const stamp = el("p", null, "caption");
+        if (item.kind === "maintenance") stamp.append("Maintenance · ");
+        stamp.append(time(item.startsAt));
+        entry.append(el("h3", item.title), stamp);
+        if (item.kind === "automatic") {
+          const confirmed = el("p", "Confirmed ", "caption");
+          confirmed.append(time(item.confirmedAt));
+          entry.append(confirmed);
+        } else entry.append(el("p", item.body, "body"));
+        if (item.endsAt != null) {
+          const end = el(
+            "p",
+            item.kind === "automatic" ? "Recovered " : "End ",
+            "caption",
+          );
+          end.append(time(item.endsAt));
+          entry.append(end);
+        }
+        if (
+          item.incidentId &&
+          automatic.some((incident) => incident.id === item.incidentId)
+        ) {
+          const link = el("a", "Related incident", "caption");
+          link.href = `#incident-${item.incidentId}`;
+          entry.append(link);
+        }
+        return entry;
+      }),
+  );
+  renderedIncidents = key;
+}
+
+function preserveTables(update) {
+  const roots = [$("#availability"), $("#activity-history")];
+  const reading = roots.map((root) => {
+    const details = root.querySelector("details");
+    const wrap = details?.querySelector(".table-scroll");
     return {
-      id,
       open: details?.open,
-      top: wrap?.scrollTop ?? 0,
-      left: wrap?.scrollLeft ?? 0,
+      top: wrap?.scrollTop,
+      left: wrap?.scrollLeft,
       focused:
-        wrap && document.activeElement === wrap
-          ? "table"
-          : details &&
-              document.activeElement === details.querySelector("summary")
-            ? "summary"
-            : null,
+        details?.contains(document.activeElement) &&
+        document.activeElement.tagName,
     };
   });
+  update();
+  roots.forEach((root, index) => {
+    const previous = reading[index];
+    const details = root.querySelector("details");
+    if (!details || !previous) return;
+    details.open = !!previous.open;
+    const wrap = details.querySelector(".table-scroll");
+    if (previous.top != null) wrap.scrollTop = previous.top;
+    if (previous.left != null) wrap.scrollLeft = previous.left;
+    if (previous.focused === "DIV") wrap.focus({ preventScroll: true });
+    if (previous.focused === "SUMMARY")
+      details.querySelector("summary").focus({ preventScroll: true });
+    if (previous.focused === "A")
+      (details.querySelector("a") ?? details.querySelector("summary")).focus({
+        preventScroll: true,
+      });
+  });
 }
-function restoreReading(states) {
-  for (const state of states) {
-    const root = $("#" + state.id),
-      details = root.querySelector("details"),
-      wrap = root.querySelector(".table-scroll");
-    if (details) {
-      details.open = !!state.open;
-      if (state.focused === "summary")
-        details.querySelector("summary").focus({ preventScroll: true });
-    }
-    if (wrap) {
-      wrap.scrollTop = state.top;
-      wrap.scrollLeft = state.left;
-      if (state.focused === "table") wrap.focus({ preventScroll: true });
-    }
+
+async function refreshHistory() {
+  historyController?.abort();
+  const config = status?.environments[environment];
+  if (!config?.launched) return;
+  const controller = new AbortController();
+  historyController = controller;
+  const key = `environment=${environment}&range=${range.value}`;
+  if (historyKey !== key) {
+    historyKey = key;
+    historyLoaded = false;
+    $("#availability").replaceChildren();
+    $("#activity-history").replaceChildren();
+    message("#latency-detail", "");
   }
-}
-async function refresh() {
-  const request = ++generation;
-  if (
-    renderedEnvironment !== environment ||
-    renderedRange !== $("#range").value
-  ) {
-    for (const id of [
-      "components",
-      "availability",
-      "activity-history",
-      "incidents",
-    ])
-      $("#" + id).replaceChildren();
-    for (const id of ["sessions", "players", "latency"])
-      $("#" + id).textContent = "\u2014";
-    $("#latency-detail").textContent = "Waiting for measurements";
-    $("#monitoring-notice").hidden = true;
-  }
-  $("#notice").textContent = "Loading service observations…";
+  if (!historyLoaded) message("#history-message", "Loading history…");
   try {
-    const [status, history, incidents] = await Promise.all([
-      get("/api/status"),
-      get(`/api/history?environment=${environment}&range=${$("#range").value}`),
-      get("/api/incidents"),
-    ]);
-    if (request !== generation) return;
-    const config = status.environments[environment];
-    const reading = readingState();
-    $("#updated").textContent = `Updated ${date(status.generatedAt)}`;
-    $("#components").replaceChildren();
-    for (const c of config.components) {
-      const row = el("article", null, "component"),
-        badge = el("span", null, `badge ${c.state}`);
-      badge.append(
-        el("span", null, "dot"),
-        document.createTextNode(labels[c.state]),
-      );
-      row.append(el("strong", c.label), badge, time(c.lastCheckedAt));
-      $("#components").append(row);
-    }
-    const states = config.components.map((c) => c.state);
-    const missing = config.components.filter(
-      (c) => (c.measurementState ?? c.state) === "unknown",
-    );
-    $("#monitoring-notice").textContent = missing.length
-      ? `Measurements unavailable for ${missing.map((c) => c.label).join(", ")}. Check the last observation times; maintenance does not establish monitoring freshness.`
-      : "";
-    $("#monitoring-notice").hidden = !missing.length;
-    $("#notice").textContent = !config.launched
-      ? "Production multiplayer has not launched yet. Select Staging to see current monitoring."
-      : states.includes("outage")
-        ? "A multiplayer service is experiencing an outage. See the incident history below."
-        : states.includes("unknown")
-          ? "Some services have no fresh observations. Availability is unknown for those services."
-          : states.includes("maintenance")
-            ? "Planned maintenance is in progress. Check observation times for monitoring freshness."
-            : states.includes("degraded")
-              ? "A check failed or a service is recovering. Further checks will confirm its status."
-              : "All monitored services are operational.";
-    const a = config.activity;
-    $("#sessions").textContent =
-      a.state === "available"
-        ? number(a.sessions)
-        : a.state === "suppressed"
-          ? "Low activity"
-          : "Unavailable";
-    $("#players").textContent =
-      a.state === "available"
-        ? number(a.players)
-        : a.state === "suppressed"
-          ? "Low activity"
-          : "Unavailable";
-    const api = history.components.api;
-    $("#latency").textContent =
-      api.p50 == null ? "—" : `${Math.round(api.p50)} ms`;
-    $("#latency-detail").textContent =
-      api.p95 == null
-        ? "No successful API timing samples"
-        : `Median · p95 ${Math.round(api.p95)} ms · external probe, last ${Math.min(30, { "24h": 1, "7d": 7, "30d": 30, "90d": 90 }[$("#range").value])} days`;
-    availability(history, config);
-    activity(history);
-    renderIncidents(incidents);
-    restoreReading(reading);
-    renderedEnvironment = environment;
-    renderedRange = $("#range").value;
-  } catch {
-    if (request !== generation) return;
-    $("#notice").textContent =
-      "Status data is currently unavailable. Earlier displayed observations may be stale.";
-    $("#updated").textContent = "Update failed";
-    $("#monitoring-notice").textContent =
-      "Monitoring freshness could not be verified.";
-    $("#monitoring-notice").hidden = false;
-    document.querySelectorAll(".badge").forEach((b) => {
-      b.className = "badge unknown";
-      b.replaceChildren(
-        el("span", null, "dot"),
-        document.createTextNode("Unknown"),
-      );
+    const history = await get(`/api/history?${key}`, controller.signal);
+    if (controller.signal.aborted) return;
+    if (
+      history.environment !== environment ||
+      !Number.isFinite(history.from) ||
+      !(history.to > history.from) ||
+      !Array.isArray(history.activity) ||
+      config.components.some(
+        ({ id }) => !Array.isArray(history.components?.[id]?.points),
+      )
+    )
+      throw new Error("Invalid history");
+    preserveTables(() => {
+      availability(history, config.components);
+      activityHistory(history, key);
     });
-    $("#sessions").textContent = "Unavailable";
-    $("#players").textContent = "Unavailable";
-    $("#latency").textContent = "\u2014";
-    $("#latency-detail").textContent = "Latest update unavailable";
+    const api = history.components.api;
+    message(
+      "#latency-detail",
+      api.p50 == null
+        ? ""
+        : `API and server browser · ${Math.round(api.p50)} ms median · ${Math.round(api.p95)} ms p95${range.value === "90d" ? " · last 30 days" : ""}`,
+    );
+    historyLoaded = true;
+    message("#history-message", "");
+  } catch {
+    if (controller.signal.aborted) return;
+    message(
+      "#history-message",
+      historyLoaded
+        ? "Couldn’t refresh uptime and activity history. Showing the last update."
+        : "Uptime and activity history unavailable.",
+    );
   }
 }
-document.querySelectorAll("[data-environment]").forEach((button) =>
+
+function selectEnvironment(value) {
+  environment = value;
+  for (const button of buttons)
+    button.setAttribute(
+      "aria-pressed",
+      String(button.dataset.environment === value),
+    );
+  renderCurrent();
+  renderIncidents();
+  void refreshHistory();
+}
+
+async function refreshStatus() {
+  try {
+    const previous = status?.environments[environment];
+    const next = await get("/api/status");
+    if (!next.environments?.staging || !next.environments.production)
+      throw new Error("Invalid status");
+    status = next;
+    statusUnavailable = false;
+    if (!environment) {
+      selectEnvironment(
+        next.environments.production.launched ? "production" : "staging",
+      );
+    } else {
+      renderCurrent();
+      renderIncidents();
+      if (previous?.launched !== status.environments[environment].launched)
+        void refreshHistory();
+    }
+  } catch {
+    statusUnavailable = true;
+    renderCurrent();
+  }
+}
+
+async function refreshIncidents() {
+  try {
+    const next = await get("/api/incidents");
+    if (!Array.isArray(next.automatic) || !Array.isArray(next.notes))
+      throw new Error("Invalid incidents");
+    incidents = next;
+    incidentsUnavailable = false;
+  } catch {
+    incidentsUnavailable = true;
+  }
+  renderIncidents();
+}
+
+for (const button of buttons)
   button.addEventListener("click", () => {
-    environment = button.dataset.environment;
-    document
-      .querySelectorAll("[data-environment]")
-      .forEach((b) => b.setAttribute("aria-pressed", String(b === button)));
-    refresh();
-  }),
-);
-$("#range").addEventListener("change", refresh);
-refresh();
-setInterval(refresh, 60000);
+    if (button.dataset.environment !== environment)
+      selectEnvironment(button.dataset.environment);
+  });
+range.addEventListener("change", refreshHistory);
+void refreshStatus();
+void refreshIncidents();
+setInterval(refreshStatus, 60000);
+setInterval(refreshIncidents, 60000);
+setInterval(() => {
+  if (range.value === "24h") void refreshHistory();
+}, 300000);

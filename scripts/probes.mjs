@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import dns from "node:dns/promises";
 import { performance } from "node:perf_hooks";
+import { setTimeout as wait } from "node:timers/promises";
 import WebSocket from "ws";
 import { TurnAllocation } from "./turn-probe.mjs";
 export const canonical = (v) =>
@@ -13,9 +14,10 @@ export const canonical = (v) =>
           .map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`)
           .join(",")}}`;
 export class ProbeFailure extends Error {
-  constructor(reason) {
+  constructor(reason, outcome = "fail") {
     super(reason);
     this.reason = reason;
+    this.outcome = outcome;
   }
 }
 const check = (condition, reason = "invalid-response") => {
@@ -129,17 +131,17 @@ export function client(
 export async function stage(component, work) {
   const started = performance.now();
   try {
-    await work();
+    const reason = await work();
     return {
       component,
       outcome: "pass",
-      reason: "ok",
+      reason: typeof reason === "string" ? reason : "ok",
       latencyMs: Math.round(performance.now() - started),
     };
   } catch (error) {
     return {
       component,
-      outcome: "fail",
+      outcome: error instanceof ProbeFailure ? error.outcome : "fail",
       reason: error instanceof ProbeFailure ? error.reason : "probe-error",
       latencyMs: null,
     };
@@ -162,23 +164,33 @@ export function validateStatus(value) {
   );
   return value;
 }
+async function browse(api, config) {
+  const response = await api(
+    "GET",
+    `/v1/servers?build=${config.build}&protocol=${config.protocol}&limit=1`,
+  );
+  check(response.status === 200, "http-error");
+  const { servers, next } = response.value ?? {};
+  check(
+    Array.isArray(servers) &&
+      servers.length <= 1 &&
+      servers.every(
+        (entry) =>
+          typeof entry?.serverId === "string" &&
+          /^[0-9a-f]{64}$/.test(entry.serverId),
+      ) &&
+      (next === null ||
+        (typeof next === "string" && next === servers[0]?.serverId)),
+  );
+  return servers;
+}
 export async function basic(api, config) {
   return [
     await stage("api", async () => {
       const s = await api("GET", "/v1/status");
       check(s.status === 200, "http-error");
       validateStatus(s.value);
-      const browser = await api(
-        "GET",
-        `/v1/servers?build=${config.build}&protocol=${config.protocol}&limit=1`,
-      );
-      check(browser.status === 200, "http-error");
-      check(
-        Array.isArray(browser.value?.servers) &&
-          browser.value.servers.length <= 1 &&
-          (browser.value.next === null ||
-            /^[0-9a-f]{64}$/.test(browser.value.next)),
-      );
+      await browse(api, config);
     }),
   ];
 }
@@ -346,12 +358,12 @@ export async function full(
           body: { players: 0 },
         });
         check(beat.status === 200, "http-error");
-        const browser = await api(
-          "GET",
-          `/v1/servers?build=${config.build}&protocol=${config.protocol}&limit=1`,
+        const servers = await browse(api, config);
+        check(!servers.some((s) => s.serverId === host.serverId));
+        const detail = await api("GET", `/v1/servers/${host.serverId}`);
+        check(
+          detail.status === 404 && detail.value?.error?.code === "not-found",
         );
-        check(browser.status === 200 && Array.isArray(browser.value?.servers));
-        check(!browser.value.servers.some((s) => s.serverId === host.serverId));
       }),
     );
     if (!token || !invite)
@@ -384,7 +396,8 @@ export async function full(
               token,
             );
             sockets.push(a);
-            await a.next((f) => f.type === "welcome");
+            const hosting = await a.next((f) => f.type === "welcome");
+            check(hosting.role === "host");
             const b = await socketFactory(
               config.origin,
               `/v1/signal/${host.serverId}`,
@@ -392,8 +405,14 @@ export async function full(
             );
             sockets.push(b);
             const welcome = await b.next((f) => f.type === "welcome");
-            check(welcome.hostOnline === true && welcome.role === "peer");
-            await a.next((f) => f.type === "joined");
+            check(
+              welcome.hostOnline === true &&
+                welcome.hostRelayOnly === true &&
+                welcome.role === "peer" &&
+                typeof welcome.peer === "string",
+            );
+            const joined = await a.next((f) => f.type === "joined");
+            check(joined.peer === welcome.peer && joined.relayOnly === true);
             const peerIce = {
               ufrag: crypto.randomBytes(4).toString("hex"),
               pwd: crypto.randomBytes(16).toString("hex"),
@@ -403,7 +422,7 @@ export async function full(
             );
             const offer = await a.next((f) => f.type === "offer");
             check(
-              typeof offer.peer === "string" &&
+              offer.peer === joined.peer &&
                 offer.ice?.ufrag === peerIce.ufrag &&
                 offer.ice?.pwd === peerIce.pwd &&
                 Array.isArray(offer.candidates) &&
@@ -435,17 +454,20 @@ export async function full(
       ticket
         ? await stage("relay", async () => {
             check(status.features.relay && !status.killSwitch, "disabled");
-            const a = await api("POST", "/v1/turn/credentials", {
-              token,
-              body: { serverId: host.serverId },
+            const [a, b] = await relayStep("relay-credentials", async () => {
+              const values = [];
+              for (const credential of [token, ticket]) {
+                const response = await api("POST", "/v1/turn/credentials", {
+                  token: credential,
+                  body: { serverId: host.serverId },
+                });
+                check(response.status === 201);
+                values.push(response.value);
+              }
+              return values;
             });
-            check(a.status === 201, "http-error");
-            const b = await api("POST", "/v1/turn/credentials", {
-              token: ticket,
-              body: { serverId: host.serverId },
-            });
-            check(b.status === 201, "http-error");
-            await relayCheck(a.value, b.value);
+            const attempts = await relayCheck(a, b);
+            return attempts > 1 ? "relay-retried" : "ok";
           })
         : blocked("relay"),
     );
@@ -460,59 +482,117 @@ export async function full(
         check(ended.status === 204, "http-error");
       } catch {
         const discovery = results.find((r) => r.component === "discovery");
-        if (discovery)
+        if (discovery?.outcome === "pass")
           Object.assign(discovery, {
             outcome: "fail",
-            reason: "probe-error",
+            reason: "host-cleanup",
             latencyMs: null,
           });
       }
     }
   }
 }
+async function relayStep(reason, work) {
+  try {
+    return await work();
+  } catch (error) {
+    if (error instanceof ProbeFailure && error.reason === "rate-limited")
+      throw error;
+    throw new ProbeFailure(
+      reason,
+      reason === "runner-error" ? "blocked" : "fail",
+    );
+  }
+}
+
+export async function verifyRelayPayloads(a, b, sleep = wait) {
+  const channelA = 0x4000,
+    channelB = 0x4001;
+  const challenge = crypto.randomBytes(16).toString("hex");
+  const sentA = new Set(),
+    sentB = new Set();
+  const received = (allocation, channel, expected) =>
+    allocation.received.some(
+      (frame) =>
+        frame.kind === "channel" &&
+        frame.channel === channel &&
+        expected.has(frame.data),
+    );
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const fromA = `${challenge}:a:${attempt}`,
+      fromB = `${challenge}:b:${attempt}`;
+    sentA.add(fromA);
+    sentB.add(fromB);
+    await Promise.all([
+      a.sendChannel(channelA, fromA),
+      b.sendChannel(channelB, fromB),
+    ]);
+    for (let poll = 0; poll < 20; poll++) {
+      if (received(a, channelA, sentB) && received(b, channelB, sentA))
+        return attempt;
+      await sleep(50);
+    }
+    if (received(a, channelA, sentB) && received(b, channelB, sentA))
+      return attempt;
+  }
+  throw new ProbeFailure("relay-payload");
+}
+
 export async function relay(a, b) {
   function credentials(value) {
     const entry = value?.iceServers?.find(
-      (s) => typeof s.username === "string" && typeof s.credential === "string",
+      (s) =>
+        typeof s?.username === "string" &&
+        s.username &&
+        typeof s.credential === "string" &&
+        s.credential,
     );
-    const url = entry?.urls?.find((u) =>
-      /^turn:[a-zA-Z0-9.-]+:[0-9]+\?transport=udp$/.test(u),
+    const udpUrl = /^turn:([a-zA-Z0-9.-]+):([1-9][0-9]{0,4})\?transport=udp$/;
+    const url = entry?.urls?.find(
+      (u) => typeof u === "string" && udpUrl.test(u),
     );
     check(url);
-    const [, host, port] = /^turn:([^:]+):([0-9]+)/.exec(url);
+    const [, host, port] = udpUrl.exec(url);
+    check(Number(port) <= 65535);
     return { entry, host, port: Number(port) };
   }
-  const ca = credentials(a),
-    cb = credentials(b);
-  check(ca.host === cb.host && ca.port === cb.port);
+  const [ca, cb] = await relayStep("relay-credentials", () => {
+    const ca = credentials(a),
+      cb = credentials(b);
+    check(ca.host === cb.host && ca.port === cb.port);
+    return [ca, cb];
+  });
   const server = {
-    address: (await dns.lookup(ca.host, { family: 4 })).address,
+    address: (
+      await relayStep("relay-dns", () => dns.lookup(ca.host, { family: 4 }))
+    ).address,
     port: ca.port,
   };
-  const x = new TurnAllocation(server, ca.entry.username, ca.entry.credential),
-    y = new TurnAllocation(server, cb.entry.username, cb.entry.credential);
+  let x, y;
   try {
-    await x.bind();
-    await y.bind();
-    const xa = await x.allocate(),
-      ya = await y.allocate();
-    check(await x.permit(ya));
-    check(await y.permit(xa));
-    check(await x.channel(0x4000, ya));
-    check(await y.channel(0x4001, xa));
-    x.sendChannel(0x4000, "topiaforge-monitor-a");
-    y.sendChannel(0x4001, "topiaforge-monitor-b");
-    const until = performance.now() + 3000;
-    while (
-      performance.now() < until &&
-      (!x.received.length || !y.received.length)
-    )
-      await new Promise((r) => setTimeout(r, 50));
-    check(
-      x.received.some((m) => m.data === "topiaforge-monitor-b") &&
-        y.received.some((m) => m.data === "topiaforge-monitor-a"),
-    );
+    await relayStep("runner-error", async () => {
+      x = new TurnAllocation(server, ca.entry.username, ca.entry.credential);
+      y = new TurnAllocation(server, cb.entry.username, cb.entry.credential);
+      await x.bind();
+      await y.bind();
+    });
+    const [xa, ya] = await relayStep("relay-allocation", async () => {
+      const xa = await x.allocate(),
+        ya = await y.allocate();
+      check(xa.family === 4 && ya.family === 4);
+      check(xa.address !== ya.address || xa.port !== ya.port);
+      return [xa, ya];
+    });
+    await relayStep("relay-permission", async () => {
+      check(await x.permit(ya));
+      check(await y.permit(xa));
+    });
+    await relayStep("relay-channel", async () => {
+      check(await x.channel(0x4000, ya));
+      check(await y.channel(0x4001, xa));
+    });
+    return await relayStep("relay-payload", () => verifyRelayPayloads(x, y));
   } finally {
-    await Promise.allSettled([x.release(), y.release()]);
+    await Promise.allSettled([x?.release(), y?.release()]);
   }
 }

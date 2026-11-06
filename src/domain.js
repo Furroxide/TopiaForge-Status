@@ -5,6 +5,18 @@ export const COMPONENTS = Object.freeze({
   signaling: { label: "Signaling", cadence: 600 },
   relay: { label: "TURN relay", cadence: 600 },
 });
+export const MONITOR_MODES = Object.freeze({
+  basic: { cadence: COMPONENTS.api.cadence, components: ["api"] },
+  full: {
+    cadence: COMPONENTS.discovery.cadence,
+    components: ["discovery", "invites", "signaling", "relay"],
+  },
+});
+export const slotAt = (at, cadence) => Math.floor(at / cadence) * cadence;
+export const validRunId = (id) =>
+  typeof id === "string" && /^[0-9]{1,24}(?:-[0-9]{1,4})?$/.test(id);
+export const validObservationTime = (at, now, age) =>
+  Number.isSafeInteger(at) && at > 0 && at <= now + 30 && at >= now - age;
 export const RANGES = Object.freeze({
   "24h": 86400,
   "7d": 604800,
@@ -20,6 +32,15 @@ export const REASONS = Object.freeze([
   "dependency",
   "probe-error",
   "rate-limited",
+  "runner-error",
+  "host-cleanup",
+  "relay-credentials",
+  "relay-dns",
+  "relay-allocation",
+  "relay-permission",
+  "relay-channel",
+  "relay-payload",
+  "relay-retried",
 ]);
 export function consecutive(a, b, cadence) {
   return !!a && !!b && a.slot - b.slot === cadence;
@@ -46,7 +67,7 @@ export function summary(
   rows,
   daily,
   now,
-  since,
+  firstSlot,
   cadence,
   latencySince = -Infinity,
 ) {
@@ -56,10 +77,12 @@ export function summary(
   const failed =
     rows.filter((r) => r.outcome === "fail").length +
     daily.reduce((n, r) => n + r.failed, 0);
+  // The current slot isn't a gap while there is still time for a check to run.
+  const currentSlot = slotAt(now, cadence);
+  const lastSlot =
+    rows.at(-1)?.slot === currentSlot ? currentSlot : currentSlot - cadence;
   const expected =
-    since == null || since > now
-      ? 0
-      : Math.floor(now / cadence) - Math.floor(since / cadence) + 1;
+    firstSlot == null ? 0 : Math.max(0, (lastSlot - firstSlot) / cadence + 1);
   const latencies = rows
     .filter(
       (r) =>
@@ -119,12 +142,11 @@ export function validateActivity(value, now) {
 export function validateObservation(value, now, environments) {
   if (
     !value ||
+    typeof value.environment !== "string" ||
     !Object.hasOwn(environments, value.environment) ||
     !environments[value.environment].launched ||
-    !/^[0-9]{1,24}(?:-[0-9]{1,4})?$/.test(value.runId) ||
-    !Number.isSafeInteger(value.observedAt) ||
-    value.observedAt > now + 30 ||
-    value.observedAt < now - 3600 ||
+    !validRunId(value.runId) ||
+    !validObservationTime(value.observedAt, now, 3600) ||
     !Array.isArray(value.components) ||
     value.components.length > 5 ||
     !value.components.length
@@ -133,6 +155,7 @@ export function validateObservation(value, now, environments) {
   const seen = new Set();
   const components = value.components.map((r) => {
     if (
+      typeof r?.component !== "string" ||
       !Object.hasOwn(COMPONENTS, r.component) ||
       seen.has(r.component) ||
       !["pass", "fail", "blocked"].includes(r.outcome) ||
@@ -151,6 +174,18 @@ export function validateObservation(value, now, environments) {
       latencyMs: r.latencyMs,
     };
   });
+  const { mode, slot } = value;
+  if (mode !== undefined || slot !== undefined) {
+    if (typeof mode !== "string" || !Object.hasOwn(MONITOR_MODES, mode))
+      throw new Error("invalid monitoring mode");
+    const expected = MONITOR_MODES[mode];
+    if (
+      slot !== slotAt(value.observedAt, expected.cadence) ||
+      components.length !== expected.components.length ||
+      expected.components.some((component) => !seen.has(component))
+    )
+      throw new Error("observation does not match its slot or mode");
+  }
   let activity = null;
   try {
     if (value.activity != null)
@@ -162,6 +197,8 @@ export function validateObservation(value, now, environments) {
     environment: value.environment,
     runId: value.runId,
     observedAt: value.observedAt,
+    mode,
+    slot,
     components,
     activity,
   };

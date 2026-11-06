@@ -15,10 +15,10 @@ No uptime history or sample player activity is seeded. The page uses TopiaForge'
 ## Data and meaning
 
 - Basic API/browser probes run every five minutes; hosting, invites, signaling and real UDP TURN probes every ten.
-- One durable claim per environment, mode and time slot bounds queued or manually dispatched checks.
-- A failed check degrades the component. Two failures in adjacent slots open an incident; two adjacent successes recover it.
+- A durable claim ties each run to one environment, mode and time slot. Full probes also hold a short lease so adjacent runs cannot use the same synthetic host at once. The runner retries transient storage errors with the same claim and the same measurements.
+- A failed check degrades the component. Two failures in adjacent slots open an incident, and two adjacent successes recover it. Either result in the latest pair can arrive first.
 - Missing or blocked checks are unknown. Freshness expires after three check intervals. Observed uptime excludes unknowns; coverage exposes their absence. Maintenance does not erase failed measurements.
-- The current API preserves `measurementState` separately from maintenance. Missing evidence remains visible during maintenance, and the page shows when monitoring began for each service. Coverage counts expected checks only from that start within the selected window; earlier time remains unobserved.
+- The current API preserves `measurementState` separately from maintenance. Missing evidence remains visible during maintenance, and the page shows when monitoring began for each service. Coverage starts with that first slot and counts the current slot once a measurement arrives or the slot ends.
 - Response times measure the external probe's API and browser journey, not in-game latency. Median and p95 use successful detailed observations from at most 30 days. The 90-day view uses UTC calendar-day boundaries so archived daily counts cannot inflate a partial day.
 - Activity includes public and invite-only Internet sessions across builds, excludes LAN sessions and configured synthetic identities, and uses host-reported player counts. These are estimates, not unique players.
 - The control plane suppresses both counts below five active sessions or ten reported players, stores no exact suppressed counts, and waits fifteen minutes before releasing a snapshot. Only released aggregates enter this database. Stale or malformed optional activity never discards otherwise valid uptime observations.
@@ -45,9 +45,15 @@ Edit `config/incidents.json` through a reviewed change. Each record has `id`, `e
 - `GET /api/status`: environments, component status, latest check times and released activity.
 - `GET /api/history?environment=staging&range=24h`: `24h`, `7d`, `30d`, or `90d`; observed uptime, coverage, latency and released activity. Daily historical summaries replace expired detailed samples.
 - `GET /api/incidents`: automatic incidents and committed explanations/maintenance.
-- `/internal/claim` and `/internal/observations`: authenticated monitor-only writes, never callable by page visitors. Unauthenticated access is always 401.
+- `/internal/run-claim` and `/internal/observations`: authenticated monitor writes. `/internal/claim` supports earlier runners during the rollout. All three reject unauthenticated access.
 
-An external Linux runner schedules staging probes. The GitHub Actions workflow is available for manual checks. When data is stale, check the runner timers and the latest ingest result. Keep missing slots visible in history. This status service shares Cloudflare infrastructure with multiplayer, so a provider-wide outage can affect both.
+The page refreshes current checks and incidents every minute. It refreshes 24-hour history every five minutes and loads longer windows on selection. Successful history responses are briefly cached at the edge.
+
+An external Linux runner schedules staging probes. The GitHub Actions workflow is available for manual checks from `main`. Deploy the Worker with its migrations through the protected workflow before updating the runner. Earlier runners can keep collecting during that deployment. Roll back the runner before rolling back the Worker.
+
+When data is stale, compare the timer runs with the slot and result in the runner log and check for a storage acknowledgement. TURN reports fixed failure stages for credential issuance, DNS, allocation, permission, channel binding and payload delivery. A pass after a packet retry is stored as `relay-retried`. A local UDP socket setup failure leaves the result unknown. Verify both modes in public history after updating the runner.
+
+A provider-wide Cloudflare outage can affect both this page and multiplayer.
 
 ## Author and player experience
 
