@@ -30,6 +30,7 @@ for (const name of [
   "_headers",
   "app.js",
   "history-chart.js",
+  "activity.js",
   "style.css",
   "wordmark.png",
   "favicon.png",

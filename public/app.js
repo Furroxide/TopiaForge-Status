@@ -1,3 +1,4 @@
+import { publicActivity, bandText } from "./activity.js";
 import { activityPlot, availabilityBuckets } from "./history-chart.js";
 
 const $ = (selector) => document.querySelector(selector);
@@ -161,10 +162,11 @@ function renderCurrent() {
   renderActivitySummary(config.activity);
 }
 
-function renderActivitySummary(activity) {
+function renderActivitySummary(value) {
+  const activity = publicActivity(value);
   const root = $("#activity-current");
   root.replaceChildren();
-  if (statusUnavailable || activity.state === "unavailable") {
+  if (statusUnavailable || !activity || activity.state === "unavailable") {
     root.append(el("p", "No recent activity estimate.", "muted"));
     return;
   }
@@ -173,11 +175,11 @@ function renderActivitySummary(activity) {
   } else {
     const totals = el("dl", null, "activity-totals");
     for (const [label, value] of [
-      ["Active sessions", activity.sessions],
-      ["Reported players", activity.players],
+      ["Public sessions", activity.sessionsBand],
+      ["Public players", activity.playersBand],
     ]) {
       const total = el("div");
-      total.append(el("dt", label, "caption"), el("dd", number(value)));
+      total.append(el("dt", label, "caption"), el("dd", bandText(value)));
       totals.append(total);
     }
     root.append(totals);
@@ -309,7 +311,8 @@ function availability(history, components) {
 function activityHistory(history, query) {
   const root = $("#activity-history");
   root.replaceChildren();
-  const rows = history.activity;
+  const rows = history.activity.map(publicActivity).filter(Boolean);
+  history = { ...history, activity: rows };
   if (!rows.length) {
     root.append(el("p", "No activity samples in this window.", "empty"));
     return;
@@ -325,7 +328,7 @@ function activityHistory(history, query) {
     svg.setAttribute("role", "img");
     svg.setAttribute(
       "aria-label",
-      "Reported players over time. Gaps show periods without published counts.",
+      "Lower bounds of public player bands over time. Gaps show periods without published bands.",
     );
     const line = document.createElementNS(ns, "path");
     line.setAttribute("d", plot.path);
@@ -334,24 +337,24 @@ function activityHistory(history, query) {
       svg,
       el(
         "figcaption",
-        `Reported players · peak ${number(plot.peak)} · ${date(history.from)} – ${date(history.to)}`,
+        `Public player band lower bounds · peak band ${bandText({ min: plot.peak, max: plot.peak + 9 })} · ${date(history.from)} – ${date(history.to)}`,
         "caption chart-window",
       ),
     );
     root.append(figure);
   } else {
     root.append(
-      el("p", "No player counts were published in this window.", "empty"),
+      el("p", "No player bands were published in this window.", "empty"),
     );
   }
   root.append(
     table(
       "Activity samples",
-      ["Sample time", "Sessions", "Players", "Counts"],
+      ["Sample time", "Sessions", "Players", "Status"],
       rows.slice(-288).map((sample) => [
         date(sample.sampledAt),
-        sample.sessions == null ? "—" : number(sample.sessions),
-        sample.players == null ? "—" : number(sample.players),
+        bandText(sample.sessionsBand),
+        bandText(sample.playersBand),
         {
           available: "Published",
           suppressed: "Withheld",

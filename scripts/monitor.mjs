@@ -92,7 +92,7 @@ async function main() {
       });
       if (response.status === 200)
         activity = {
-          schema: "topiaforge.activity/1",
+          schema: "topiaforge.activity/2",
           ...validateActivity(response.value, Math.floor(Date.now() / 1000)),
         };
     } catch {

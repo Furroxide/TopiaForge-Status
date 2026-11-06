@@ -34,7 +34,7 @@ async function publicHistory(url, db, environment, range, now, ctx) {
   key.searchParams.set("range", range);
   const cache =
     ctx &&
-    (await globalThis.caches?.open("status-history-v2").catch(() => undefined));
+    (await globalThis.caches?.open("status-history-public-v3").catch(() => undefined));
   const saved = await cache?.match(key.href).catch(() => undefined);
   if (saved) return new Response(saved.body, { headers });
 

@@ -1,3 +1,4 @@
+import { publicActivity, ACTIVITY_SCHEMA } from "../public/activity.js";
 import {
   COMPONENTS,
   MONITOR_MODES,
@@ -80,12 +81,12 @@ export async function ingest(db, value) {
         ),
     );
   }
-  if (value.activity) {
-    const a = value.activity;
+  const a = publicActivity(value.activity);
+  if (a) {
     statements.push(
       db
-        .prepare("INSERT OR IGNORE INTO activity VALUES (?,?,?,?,?)")
-        .bind(value.environment, a.sampledAt, a.state, a.sessions, a.players),
+        .prepare("INSERT OR IGNORE INTO public_activity_v2 VALUES (?,?,?,?,?)")
+        .bind(value.environment, a.sampledAt, a.state, a.sessionsBand?.min ?? null, a.playersBand?.min ?? null),
     );
   }
   const full = MONITOR_MODES.full;
@@ -203,7 +204,7 @@ export async function current(db, environments, notes, now) {
         .bind(environment, now, environment, now, now),
       db
         .prepare(
-          "SELECT sampled_at AS sampledAt,state,sessions,players FROM activity WHERE environment = ? AND sampled_at <= ? ORDER BY sampled_at DESC LIMIT 1",
+          "SELECT sampled_at AS sampledAt,state,sessions,players FROM public_activity_v2 WHERE environment = ? AND sampled_at <= ? ORDER BY sampled_at DESC LIMIT 1",
         )
         .bind(environment, now - 900),
       ...entries.map(([id]) =>
@@ -246,7 +247,7 @@ export async function current(db, environments, notes, now) {
         reason: rows[0]?.reason ?? null,
       };
     });
-    const activity = samples.results[0];
+    const activity = storedActivity(samples.results[0]);
     output[environment] = {
       label: config.label,
       launched: config.launched,
@@ -255,9 +256,11 @@ export async function current(db, environments, notes, now) {
         config.launched && activity && now - activity.sampledAt < 1800
           ? activity
           : {
+              schema: ACTIVITY_SCHEMA,
+              scope: "public",
               state: "unavailable",
-              sessions: null,
-              players: null,
+              sessionsBand: null,
+              playersBand: null,
               sampledAt: activity?.sampledAt ?? null,
             },
     };
@@ -337,13 +340,13 @@ export async function history(db, environment, seconds, now) {
     from: start,
     to: now,
     components,
-    activity: await all(
+    activity: (await all(
       db,
-      "SELECT sampled_at AS sampledAt,state,sessions,players FROM activity WHERE environment = ? AND sampled_at >= ? AND sampled_at <= ? ORDER BY sampled_at",
+      "SELECT sampled_at AS sampledAt,state,sessions,players FROM public_activity_v2 WHERE environment = ? AND sampled_at >= ? AND sampled_at <= ? ORDER BY sampled_at",
       environment,
       start,
       now - 900,
-    ),
+    )).map(storedActivity).filter(Boolean),
     latencyWindowDays: 30,
   };
 }
@@ -380,7 +383,7 @@ export async function retain(db, now) {
     db.prepare("DELETE FROM observations WHERE slot < ?").bind(cutoff),
     db.prepare("DELETE FROM daily WHERE day < ?").bind(now - 90 * DAY),
     db
-      .prepare("DELETE FROM activity WHERE sampled_at < ?")
+      .prepare("DELETE FROM public_activity_v2 WHERE sampled_at < ?")
       .bind(now - 90 * DAY),
     db
       .prepare(
@@ -390,4 +393,13 @@ export async function retain(db, now) {
     db.prepare("DELETE FROM claims WHERE slot < ?").bind(now - 86400),
     db.prepare("DELETE FROM claim_owners WHERE slot < ?").bind(now - 86400),
   ]);
+}
+
+function storedActivity(row) {
+  if (!row) return null;
+  return publicActivity({
+    schema: ACTIVITY_SCHEMA, scope: "public", sampledAt: row.sampledAt, state: row.state,
+    sessionsBand: row.sessions === null ? null : { min: row.sessions, max: row.sessions + 4 },
+    playersBand: row.players === null ? null : { min: row.players, max: row.players + 9 },
+  });
 }

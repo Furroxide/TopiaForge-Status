@@ -70,11 +70,11 @@ test("activity shows isolated samples and breaks the line across missing or with
     from: 0,
     to: 2400,
     activity: [
-      { sampledAt: 300, state: "available", players: 10 },
+      { schema: "topiaforge.activity/2", scope: "public", sampledAt: 300, state: "available", sessionsBand: { min: 5, max: 9 }, playersBand: { min: 10, max: 19 } },
       { sampledAt: 600, state: "suppressed", players: null },
-      { sampledAt: 900, state: "available", players: 15 },
-      { sampledAt: 1200, state: "available", players: 20 },
-      { sampledAt: 1800, state: "available", players: 13 },
+      { schema: "topiaforge.activity/2", scope: "public", sampledAt: 900, state: "available", sessionsBand: { min: 5, max: 9 }, playersBand: { min: 10, max: 19 } },
+      { schema: "topiaforge.activity/2", scope: "public", sampledAt: 1200, state: "available", sessionsBand: { min: 5, max: 9 }, playersBand: { min: 20, max: 29 } },
+      { schema: "topiaforge.activity/2", scope: "public", sampledAt: 1800, state: "available", sessionsBand: { min: 5, max: 9 }, playersBand: { min: 10, max: 19 } },
     ],
   };
   const plot = activityPlot(data);
@@ -86,4 +86,11 @@ test("activity shows isolated samples and breaks the line across missing or with
   assert.match(commands[3], /^M.*h0$/);
   assert.equal(commands.length, 4);
   assert.equal(activityPlot({ ...data, activity: [data.activity[1]] }), null);
+});
+
+test("a mixed-version activity response cannot show legacy exact values in the chart", () => {
+  assert.equal(activityPlot({ from: 0, to: 2400, activity: [
+    { sampledAt: 300, state: "available", sessions: 7, players: 19 },
+    { schema: "topiaforge.activity/1", sampledAt: 600, state: "available", sessions: 7, players: 19 },
+  ] }), null);
 });
