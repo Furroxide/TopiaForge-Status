@@ -1,4 +1,6 @@
 import { test } from "node:test";
+import { DatabaseSync } from "node:sqlite";
+import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import { database } from "./support/db.js";
 import worker from "../src/worker.js";
@@ -73,11 +75,12 @@ test("optional stale activity cannot discard a valid reliability observation", a
   const payload = {
     ...observation(NOW, "pass"),
     activity: {
-      schema: "topiaforge.activity/1",
+      schema: "topiaforge.activity/2",
+    scope: "public",
       sampledAt: NOW - 86700,
       state: "suppressed",
-      sessions: null,
-      players: null,
+      sessionsBand: null,
+      playersBand: null,
     },
   };
   const response = await worker.fetch(
@@ -431,11 +434,12 @@ test("maintenance preserves measured failures and production never starts green"
 });
 test("activity validation enforces delay and suppression before ingestion", () => {
   const a = {
-    schema: "topiaforge.activity/1",
+    schema: "topiaforge.activity/2",
+    scope: "public",
     sampledAt: NOW - 900,
     state: "available",
-    sessions: 5,
-    players: 10,
+    sessionsBand: { min: 5, max: 9 },
+    playersBand: { min: 10, max: 19 },
   };
   assert.equal(
     validateActivity({ ...a, serverId: "must-be-stripped" }, NOW).serverId,
@@ -443,22 +447,24 @@ test("activity validation enforces delay and suppression before ingestion", () =
   );
   for (const invalid of [
     { ...a, sampledAt: NOW },
-    { ...a, sessions: 4 },
-    { ...a, players: 9 },
+    { ...a, sessionsBand: { min: 4, max: 8 } },
+    { ...a, playersBand: { min: 9, max: 18 } },
     { ...a, state: "suppressed" },
     { ...a, state: "unavailable" },
   ])
     assert.throws(() => validateActivity(invalid, NOW));
   assert.deepEqual(
     validateActivity(
-      { ...a, state: "suppressed", sessions: null, players: null },
+      { ...a, state: "suppressed", sessionsBand: null, playersBand: null },
       NOW,
     ),
     {
+      schema: "topiaforge.activity/2",
+      scope: "public",
       sampledAt: NOW - 900,
       state: "suppressed",
-      sessions: null,
-      players: null,
+      sessionsBand: null,
+      playersBand: null,
     },
   );
 });
@@ -468,11 +474,12 @@ test("all public endpoints expose only released counts and fixed observation fie
   t.mock.method(Date, "now", () => NOW * 1000);
   const env = { DB: db, INGEST_TOKEN: token };
   const a = {
-    schema: "topiaforge.activity/1",
+    schema: "topiaforge.activity/2",
+    scope: "public",
     sampledAt: NOW - 900,
     state: "suppressed",
-    sessions: null,
-    players: null,
+    sessionsBand: null,
+    playersBand: null,
     secret: "never persist",
   };
   const v = {
@@ -751,4 +758,38 @@ test("incident notes reject duplicate IDs, invalid windows and unknown services"
     [{ ...note, components: ["database"] }],
   ])
     assert.throws(() => validateNotes(value, envs));
+});
+
+test("legacy activity is rejected and cannot repopulate public current or history APIs", async (t) => {
+  const db = database(); t.after(() => db.close());
+  const legacy = { schema: "topiaforge.activity/1", sampledAt: NOW-900,
+    state: "available", sessions: 7, players: 19 };
+  assert.throws(() => validateActivity(legacy, NOW));
+  const safe = { schema: "topiaforge.activity/2", scope: "public", sampledAt: NOW-900,
+    state: "available", sessionsBand: { min: 5, max: 9 }, playersBand: { min: 10, max: 19 } };
+  for (const invalid of [ { ...safe, scope: "combined" }, { ...safe, scope: undefined },
+    { ...safe, sessionsBand: { min: 7, max: 11 } }, { ...safe, playersBand: { min: 10, max: 18 } } ])
+    assert.throws(() => validateActivity(invalid, NOW));
+  await db.prepare("INSERT INTO activity VALUES (?,?,?,?,?)").bind("staging", NOW-900, "available",7,19).run();
+  await ingest(db, { ...observation(NOW, "pass"), activity: legacy });
+  assert.equal((await current(db, envs, [], NOW)).environments.staging.activity.state, "unavailable");
+  assert.deepEqual((await history(db,"staging",86400,NOW)).activity, []);
+  await ingest(db, { ...observation(NOW, "pass"), activity: validateActivity(safe,NOW) });
+  assert.deepEqual((await current(db,envs,[],NOW)).environments.staging.activity,safe);
+  assert.deepEqual((await history(db,"staging",86400,NOW)).activity,[safe]);
+});
+
+test("public activity migration deletes preexisting combined history before blocking legacy writers", (t) => {
+  const sqlite = new DatabaseSync(":memory:");
+  t.after(() => sqlite.close());
+  const migrate = (name) => sqlite.exec(readFileSync(new URL(`../migrations/${name}`, import.meta.url), "utf8"));
+  migrate("0001_status.sql");
+  migrate("0002_claim_owners.sql");
+  sqlite.prepare("INSERT INTO activity VALUES (?,?,?,?,?)").run("staging", NOW-900, "available", 7, 19);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM activity").get().count, 1);
+  migrate("0003_public_activity.sql");
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM activity").get().count, 0);
+  sqlite.prepare("INSERT INTO activity VALUES (?,?,?,?,?)").run("staging", NOW-900, "available", 7, 19);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM activity").get().count, 0);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM public_activity_v2").get().count, 0);
 });

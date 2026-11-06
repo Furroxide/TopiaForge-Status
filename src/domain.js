@@ -1,3 +1,4 @@
+import { publicActivity } from "../public/activity.js";
 export const COMPONENTS = Object.freeze({
   api: { label: "Control plane API", cadence: 300 },
   discovery: { label: "Discovery and hosting", cadence: 600 },
@@ -108,36 +109,10 @@ export function summary(
   };
 }
 export function validateActivity(value, now) {
-  if (
-    !value ||
-    value.schema !== "topiaforge.activity/1" ||
-    !Number.isSafeInteger(value.sampledAt) ||
-    value.sampledAt % 300 ||
-    value.sampledAt > now - 900 ||
-    value.sampledAt < now - 86400
-  )
+  const activity = publicActivity(value);
+  if (!activity || activity.sampledAt > now - 900 || activity.sampledAt < now - 86400)
     throw new Error("invalid activity");
-  if (!["available", "suppressed", "unavailable"].includes(value.state))
-    throw new Error("invalid activity");
-  if (value.state === "available") {
-    if (
-      !Number.isSafeInteger(value.sessions) ||
-      value.sessions < 5 ||
-      value.sessions > 1e7 ||
-      !Number.isSafeInteger(value.players) ||
-      value.players < 10 ||
-      value.players > 1e9
-    )
-      throw new Error("invalid activity");
-  } else if (value.sessions !== null || value.players !== null)
-    throw new Error("invalid activity");
-  // Reconstruct instead of retaining arbitrary fields from an authenticated caller.
-  return {
-    sampledAt: value.sampledAt,
-    state: value.state,
-    sessions: value.sessions,
-    players: value.players,
-  };
+  return activity;
 }
 export function validateObservation(value, now, environments) {
   if (

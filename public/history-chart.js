@@ -1,3 +1,4 @@
+import { publicActivity } from "./activity.js";
 const DAY = 86400;
 export function availabilityBuckets(history, component, cadence) {
   const archived = history.to - history.from > 30 * DAY;
@@ -60,9 +61,10 @@ export function availabilityBuckets(history, component, cadence) {
 }
 
 export function activityPlot({ activity, from, to }) {
+  activity = activity.map((value) => publicActivity(value) ?? { state: "unavailable" });
   const max = activity.reduce(
     (peak, sample) =>
-      sample.state === "available" ? Math.max(peak, sample.players) : peak,
+      sample.state === "available" ? Math.max(peak, sample.playersBand.min) : peak,
     0,
   );
   if (!max || to <= from) return null;
@@ -75,7 +77,7 @@ export function activityPlot({ activity, from, to }) {
     const sample = activity[index];
     if (sample.state !== "available") continue;
     const x = 5 + (990 * (sample.sampledAt - from)) / (to - from);
-    const y = 140 - (130 * sample.players) / max;
+    const y = 140 - (130 * sample.playersBand.min) / max;
     const continues = adjacent(activity[index - 1], sample);
     const point = `${continues ? "L" : "M"}${x.toFixed(2)},${y.toFixed(2)}`;
     // A move alone has no stroke. The round cap makes a lone sample visible.
